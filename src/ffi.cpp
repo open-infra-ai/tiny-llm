@@ -46,16 +46,16 @@ struct TinyLlmHandleImpl {
     tiny_llm::LayerWorkspace                                 workspace;
     float                                                   *rope_cos = nullptr;
     float                                                   *rope_sin = nullptr;
-    half                       *hidden_buf = nullptr; // [max_seq_len * hidden]
-    half                       *logits_buf = nullptr; // [vocab_size]
-    cudaStream_t                stream = 0;
-    int                         max_batch_size = 1;
-    tiny_llm::DeviceBuffer<int> d_tokens;   // token ids 上传缓冲（gather 需 device 指针）
-    tiny_llm::DeviceBuffer<int> decode_len; // 任务 3.1：decode 可见 KV 长度 (device int)
-    tiny_llm::DeviceBuffer<int> rope_pos;   // 任务 3.2：RoPE 起始位置 (device int)
-    tiny_llm::DeviceBuffer<int> d_next_tokens; // normal greedy 的逐序列 device 输出
-    tiny_llm::DeviceBuffer<half>      d_batch_hidden; // [batch, hidden] 的末层状态
-    tiny_llm::DeviceBuffer<half>      d_batch_logits; // [batch, vocab] 的末端 logits
+    half                        *hidden_buf = nullptr; // [max_seq_len * hidden]
+    half                        *logits_buf = nullptr; // [vocab_size]
+    cudaStream_t                 stream = 0;
+    int                          max_batch_size = 1;
+    tiny_llm::DeviceBuffer<int>  d_tokens;   // token ids 上传缓冲（gather 需 device 指针）
+    tiny_llm::DeviceBuffer<int>  decode_len; // 任务 3.1：decode 可见 KV 长度 (device int)
+    tiny_llm::DeviceBuffer<int>  rope_pos;   // 任务 3.2：RoPE 起始位置 (device int)
+    tiny_llm::DeviceBuffer<int>  d_next_tokens;  // normal greedy 的逐序列 device 输出
+    tiny_llm::DeviceBuffer<half> d_batch_hidden; // [batch, hidden] 的末层状态
+    tiny_llm::DeviceBuffer<half> d_batch_logits; // [batch, vocab] 的末端 logits
     std::unordered_map<int, SeqState> sequences;
 
     // ── 分页 KV（策略 1，max_num_blocks > 0）──
