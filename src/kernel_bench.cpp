@@ -305,15 +305,16 @@ double benchElementwise(const char *name, int n, int warmup, int iters) {
 //   direct     = attention_decode_paged
 // gather_k / gather_v 单独计时，用于区分「省下的 gather」与「direct 自身开销」。
 //
-// §10.1 记录的两个测量陷阱在本文件内规避：
+// §10.1 记录的三个测量陷阱在本文件内规避：
 //   1. GPU 空闲时 SM 时钟停在低频、小 kernel 推不动 boost → 计时前先做持续负载预热；
-//   2. host-int 重载每次调用附带一次 4 字节 H2D memcpy → 一律走 device-int 重载。
-// 第三个陷阱（误编到 sm_75）由构建参数保证：必须以 -DCMAKE_CUDA_ARCHITECTURES=native
-// 配置，程序启动时把设备 compute capability 写进 provenance 供核对。
+//   2. host-int 重载每次调用附带一次 4 字节 H2D memcpy → 一律走 device-int 重载；
+//   3. 误编到 sm_75 而设备是 sm_120 → 构建必须用 -DCMAKE_CUDA_ARCHITECTURES=native；
+//      程序把设备 compute capability 写进 provenance，便于一眼核对。
 //
 // 采样：每个 sample 计时 batch 次调用再除以 batch（摊薄 launch 开销）；路径按 round
 // 轮转顺序交替（order-balanced，抑制时钟漂移）；报告 median / p10 / p90 / CV。
-// CV > 10% 或 3 次重复的 median 差异 > 10% 的 shape 标 not_converged，但不丢弃。
+// CV > 10% 或重复间 median 差异 > 10% 的行标 not_converged（只约束三条对比路径），
+// 但不丢弃。
 // ===========================================================================
 
 struct DpaArgs {
