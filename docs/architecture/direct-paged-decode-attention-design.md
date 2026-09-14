@@ -377,9 +377,9 @@ prefill/decode、RoPE、FFI 缓冲尺寸），对合法模型零行为变化。
 |----|------|----------|------|
 | PR-1 重构（行为不变） | ~~把 decode 的 tile loop 抽成共享模板~~ **执行时被门禁否决（+1.4~2.3% 回归，§10.1）；后按 issue #8 翻转为接受回归并改回共享循环（§10.2），已并入 PR-2** | `kernels/attention.cu` | 连续路径数值逐位不变 + 现有测试全过 + 回归已测量并显式记录 |
 | PR-2 kernel | 新增 `attention_decode_paged`（与连续版共用 `decode_online_softmax`，各自一份取址策略）+ 头声明 + kernel 级差分测试 + sanitizer | `kernels/attention.{cu,cuh}`、`tests/**` | §8 的 kernel 级 1/2 层；**不改 FFI、不改 Transformer** |
-| PR-3 runtime dispatch | `attentionPaged` decode 分支切 direct；`TLLM_PAGED_ATTENTION` 开关与降级日志 | `src/transformer.cpp`、`include/tiny_llm/transformer.h`、`tests/**` | §8 的 layer 级 + §7 校验用例 + 开关三态的测试 |
+| PR-3 runtime dispatch | `attentionPaged` decode 分支按 `TLLM_PAGED_ATTENTION` 分发（`auto`/`legacy`/`direct`；默认 `legacy`）；direct 时跳过 gather；非法取值显式报错；显式 legacy 打一次 `TLLM_WARN` | `src/transformer.cpp`、`tests/**` | **已提交：#9**。layer 级逐位比对 + 开关三态 + prefill 不受影响的测试；变异检验 3 项 |
 | PR-4 ABI/integration | **计划为空**：本设计不改 C ABI。若实施中发现必须改，则与 `paged-serving` 成对提交并按 §5 的 ABI 包评审 | — | 未发生则不开 PR |
-| PR-5 benchmark | 三路 kernel benchmark + 结果归档（须绑定 PR-2/3 的 correctness commit） | `src/kernel_bench.cpp`、`docs/performance/**` | §9；raw data 与 provenance |
+| PR-5 benchmark | 三路 kernel benchmark + 结果归档（须绑定 PR-2/3 的 correctness commit）；**通过后把 `TLLM_PAGED_ATTENTION` 默认值由 `legacy` 改为 `auto`** | `src/kernel_bench.cpp`、`docs/performance/**` | §9；raw data 与 provenance |
 | PR-6 docs | 更新能力边界（仅在证据完成后） | `docs/architecture/**`、`CHANGELOG.md` | 只能引用已归档证据 |
 
 - **一个 PR 只做一层**：PR-1 只重构、PR-2 只加 kernel、PR-3 只接线；不得把
@@ -388,25 +388,6 @@ prefill/decode、RoPE、FFI 缓冲尺寸），对合法模型零行为变化。
   由同一 owner 完成，避免并行改动冲突。
 - **跨仓顺序**：本设计不触碰 C ABI，故与 `paged-serving` 无强制顺序；但 PR-3 之后
   的 PSRV-P1-002/004 若要使用 direct 收益，必须引用 PR-5 的结果包。
-
-## 11. Rollback
-
-- **Preserved legacy path**：`scatter → gather → attention_decode` **不删除**，
-  至少在 direct 路径经过固定的观察期与结果矩阵（PR-5 完成）之后才讨论删除。
-- **Feature flag / fallback**：dispatch 由开关控制，取值 `auto | legacy | direct`，
-  默认先 `legacy`，PR-3 合并且 PR-5 通过后改 `auto`。**本设计不提供"按几何自动回落"**：
-  那条分支不可达也不可测（§7），开关本身就是 fallback，三态都可直接被测。
-- **Trigger（任一命中即回滚到 `legacy`）**：
-  1. direct 与 legacy 的逐元素相等门禁在任何 shape 上失败；
-  2. Compute Sanitizer 报错；
-  3. 真实模型 canary（`TLLM_GGUF_TEST_MODEL`）token 不一致；
-  4. `paged-serving` 集成路径出现回归。
-- **Procedure**：把默认值从 `auto` 改回 `legacy`（单点改动），保留 direct 代码与其
-  失败用例；在中性提交上复现问题后再决定修复或撤销。
-- **Artifact 保留**：失败 shape、OOM、`not_converged` 结果全部保留在
-  `docs/performance/results/` 对应目录，不删除。
-- **G8 拒绝条件对照**：PR 已拆分；有 legacy fallback 与显式 flag；benchmark Agent
-  不优化算法；不改 C ABI，因此不会单侧破坏 `paged-serving`。
 
 ### 10.1 执行结果：PR-1 被门禁否决（2026-09-14）
 
@@ -475,6 +456,32 @@ direct vs legacy 逐元素相等门禁**——任何漂移立即失败。该门�
   若只有逐位差分而没有独立参考，这一类错误会整体漏过。
 
 §10.1 中记录的测量方法与回归量级仍然有效，保留作为该决策的事实依据。
+
+## 11. Rollback
+
+- **Preserved legacy path**：`scatter → gather → attention_decode` **不删除**，
+  至少在 direct 路径经过固定的观察期与结果矩阵（PR-5 完成）之后才讨论删除。
+- **Feature flag / fallback**：dispatch 由 `TLLM_PAGED_ATTENTION` 控制，取值
+  `auto | legacy | direct`（大小写不敏感），**默认（未设置）= `legacy`**；PR-5 通过后
+  改为 `auto`。**本设计不提供"按几何自动回落"**：那条分支不可达也不可测（§7），
+  开关本身就是 fallback，三态都可直接被测。
+  - 已实现的语义（PR-3 / #9）：`auto` **当前等价于 `direct`**（没有可达的不支持几何，
+    保留该取值是为了将来不必改调用方）；`legacy` 显式选择时打一次 `TLLM_WARN`，
+    便于结果包区分实际路径；**非法取值显式返回错误**，不静默回退（G5）。
+  - 开关**不做进程级缓存**：每次调用解析（约 20 ns、无堆分配），使 `setenv` 在测试中
+    即时生效，因而不需要为测试暴露 reset seam。该解析只在分页路径上执行。
+  - 只影响 strategy 1（分页 KV）的 **decode**；prefill 与 strategy 2（连续 KV）不变。
+- **Trigger（任一命中即回滚到 `legacy`）**：
+  1. direct 与 legacy 的逐元素相等门禁在任何 shape 上失败；
+  2. Compute Sanitizer 报错；
+  3. 真实模型 canary（`TLLM_GGUF_TEST_MODEL`）token 不一致；
+  4. `paged-serving` 集成路径出现回归。
+- **Procedure**：把默认值从 `auto` 改回 `legacy`（单点改动），保留 direct 代码与其
+  失败用例；在中性提交上复现问题后再决定修复或撤销。
+- **Artifact 保留**：失败 shape、OOM、`not_converged` 结果全部保留在
+  `docs/performance/results/` 对应目录，不删除。
+- **G8 拒绝条件对照**：PR 已拆分；有 legacy fallback 与显式 flag；benchmark Agent
+  不优化算法；不改 C ABI，因此不会单侧破坏 `paged-serving`。
 
 ## 12. Approval
 
