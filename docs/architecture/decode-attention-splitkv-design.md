@@ -268,8 +268,16 @@ out[d] = __float2half(ACC[d] * 1/(L + 1e-9))        // +1e-9 与乘法形式与�
   2. 段范围 off-by-one（`count_s` 少 1 / `base_s` 偏移）→ 边界用例 + oracle 捕获；
   3. 空段写垃圾而非中性值 → `visible < num_splits` 用例出现 NaN/偏差 → 捕获；
   4. combine 的 `M` 不取 max（如取 `m_0`）→ 大动态范围 score 的用例捕获；
-  5. **删掉在线 rescale**（两条路径同等出错）→ 逐位门禁通过、**独立 oracle 捕获**
-     （与 PR-2 第三项同一用意，验证分层门禁的必要性）。
+  5. **删掉在线 rescale**（两条路径同等出错）→ 逐位门禁通过 —— 但独立 oracle **在初版
+     矩阵下抓不到**：随机数据 + 短序列时全局 max 几乎总落在第一个 tile，`old_rescale`
+     恒为 `exp(0) = 1`，该路径根本没被压到（实测：注入后 11 项门禁全过）。已补
+     `LateMaxForcesOnlineRescaleToMatter`：确定性构造后置 max（末 tile 的单个 token 取大
+     K、其余 K 为 0），使其必然经过 `old_rescale ≠ 1`，此后该项被捕获。
+     **这正是 PR-2 第三项要验证的分层门禁，但前提是测试矩阵必须真的压到多 tile 的 rescale
+     路径**——记录在此，以免后人以为"写了 oracle"就自动覆盖。
+  6. 去掉 combine 中 `m == M → 1.0f` 的特例：**在本工具链上不是缺陷**。探针（`__expf(0.0f)
+     == 1.0f` 为真，+0/-0 均成立）证实该特例是冗余的；保留它只是让 §4.4 的逐位锚点不依赖
+     `__expf` 在 0 点的实现细节，而不是它在本机必需。
 - **CPU/build 与 GPU correctness 分开报告**：host 校验类用例无 GPU 也运行；kernel 用例在无
   device 时 **skip 且计数可见**，不得把 skip 记为 pass。
 - **Sanitizer**：`compute-sanitizer --tool memcheck` 跑新增用例，要求 **0 error**；并且对

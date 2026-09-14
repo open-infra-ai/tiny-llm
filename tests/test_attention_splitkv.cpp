@@ -560,7 +560,57 @@ TEST_F(SplitKvTest, GraphReplayWithGrowingVisibleMatchesEager) {
     ASSERT_EQ(cudaStreamDestroy(s), cudaSuccess);
 }
 
-// ── 8. non-default stream 与 default stream 结果一致 ──────────────────────
+// ── 9. 多 tile 的在线 rescale 必须被真正压到（变异检验 m4 暴露的缺口）───────
+//
+// 背景：随机数据 + 短序列时，全局 max 几乎总落在第一个 tile，old_rescale 恒为
+// exp(0)=1，于是"丢掉 rescale"这类实现错误不会显形（实测：初版矩阵下删掉
+// running_sum / out_acc 的 rescale 后 11 项门禁全过）。这里**确定性构造**后置 max：
+// 除最后一个 tile 的一个 token 外 K 全 0、Q 全 1 ⇒ 其余 score 恒为 0，全局 max
+// 必然落在后面的 tile，old_rescale 必然 ≠ 1。
+TEST_F(SplitKvTest, LateMaxForcesOnlineRescaleToMatter) {
+    const int     bs = 16, hd = 64, hq = 4, hkv = 4, visible = 300;
+    const int     nb = requiredBlocks(visible, bs);
+    PagedGeometry g = makeGeometry(hq, hkv, hd, bs, nb + 3);
+
+    std::vector<half> k(static_cast<size_t>(visible) * g.kvDim(), __float2half(0.0f));
+    std::vector<half> v(static_cast<size_t>(visible) * g.kvDim());
+    std::vector<half> q(static_cast<size_t>(hq) * hd, __float2half(1.0f));
+
+    // V：每个 token 一个互不相同的常数，使"前段均值"与"最后一个 token"明显不同
+    for (int t = 0; t < visible; ++t)
+        for (int c = 0; c < g.kvDim(); ++c)
+            v[static_cast<size_t>(t) * g.kvDim() + c] =
+                __float2half(static_cast<float>(t % 7) + 1.0f);
+
+    // 后置 max：token 290 落在 [256, 300)，K 全 200 ⇒ score 远大于 0
+    const int late = visible - 10;
+    for (int c = 0; c < g.kvDim(); ++c)
+        k[static_cast<size_t>(late) * g.kvDim() + c] = __float2half(200.0f);
+
+    auto b = buildCase(g, visible, 6060u);
+    b.fx->scatter(0, k, v, visible, 0);
+    b.fx->sync();
+
+    const auto ref = oracleAttentionDecode(toFloat(q), toFloat(k), toFloat(v), visible, g);
+
+    // 单遍路径跨 3 个 tile（128/128/44），必然经过 rescale
+    const auto single = toFloat(b.fx->runSinglePassPaged(0, q, visible));
+    EXPECT_LT(maxAbsDiff(single, ref), kOracleTolerance)
+        << "单遍路径未正确 rescale（旧 max 的权重被错误保留），max|diff|="
+        << maxAbsDiff(single, ref);
+
+    // split 路径：num_splits=1 时同样跨 tile；>1 时考验 combine 的跨段权重
+    for (int num_splits : {1, 2, 4, 8}) {
+        SCOPED_TRACE("num_splits=" + std::to_string(num_splits));
+        const auto got = toFloat(b.fx->runSplitPaged(0, q, visible, num_splits));
+        for (float x : got)
+            EXPECT_TRUE(std::isfinite(x));
+        EXPECT_LT(maxAbsDiff(got, ref), kOracleTolerance)
+            << "split 路径未正确合并后置 max，max|diff|=" << maxAbsDiff(got, ref);
+    }
+}
+
+// ── 10. non-default stream 与 default stream 结果一致 ──────────────────────
 TEST_F(SplitKvTest, NonDefaultStreamMatchesDefaultStream) {
     const int     bs = 16;
     const int     visible = 40;
