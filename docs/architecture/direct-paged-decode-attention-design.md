@@ -375,8 +375,8 @@ prefill/decode、RoPE、FFI 缓冲尺寸），对合法模型零行为变化。
 
 | PR | 内容 | 允许文件 | 门禁 |
 |----|------|----------|------|
-| PR-1 重构（行为不变） | ~~把 decode 的 tile loop 抽成共享模板~~ **已否决，未提交**：实测给 `attention_decode` 带来 +1.4~2.3% 可复现回归，按本节门禁回退。详见 §10.1 | — | — |
-| PR-2 kernel | 新增 `attention_decode_paged`（自持一份取址实现，复制归约循环）+ 头声明 + kernel 级差分测试 + sanitizer | `kernels/attention.{cu,cuh}`、`tests/**` | §8 的 kernel 级 1/2 层；**不改 FFI、不改 Transformer** |
+| PR-1 重构（行为不变） | ~~把 decode 的 tile loop 抽成共享模板~~ **执行时被门禁否决（+1.4~2.3% 回归，§10.1）；后按 issue #8 翻转为接受回归并改回共享循环（§10.2），已并入 PR-2** | `kernels/attention.cu` | 连续路径数值逐位不变 + 现有测试全过 + 回归已测量并显式记录 |
+| PR-2 kernel | 新增 `attention_decode_paged`（与连续版共用 `decode_online_softmax`，各自一份取址策略）+ 头声明 + kernel 级差分测试 + sanitizer | `kernels/attention.{cu,cuh}`、`tests/**` | §8 的 kernel 级 1/2 层；**不改 FFI、不改 Transformer** |
 | PR-3 runtime dispatch | `attentionPaged` decode 分支切 direct；`TLLM_PAGED_ATTENTION` 开关与降级日志 | `src/transformer.cpp`、`include/tiny_llm/transformer.h`、`tests/**` | §8 的 layer 级 + §7 校验用例 + 开关三态的测试 |
 | PR-4 ABI/integration | **计划为空**：本设计不改 C ABI。若实施中发现必须改，则与 `paged-serving` 成对提交并按 §5 的 ABI 包评审 | — | 未发生则不开 PR |
 | PR-5 benchmark | 三路 kernel benchmark + 结果归档（须绑定 PR-2/3 的 correctness commit） | `src/kernel_bench.cpp`、`docs/performance/**` | §9；raw data 与 provenance |
@@ -450,6 +450,32 @@ direct vs legacy 逐元素相等门禁**——任何漂移立即失败。该门�
 若将来重新评估这一取舍，需要的是一个**不改变 `attention_decode` 代码生成的抽取方式**，
 而不是重测同一方案。
 
+### 10.2 后续：该取舍已按 issue #8 翻转（2026-09-14）
+
+**结论已改为「接受回归、改回共享循环」。** 见 `open-infra-ai/tiny-llm#8`。
+
+翻转的理由与本节的原始记录并不矛盾——它质疑的是门禁**回退方案的收益**，而非测量本身：
+
+1. 复制方案唯一的风险是"两份实现漂移"，而这个风险已由 §8 的 direct vs legacy
+   **逐位相同**门禁自动覆盖。也就是说：**安全来自门禁，不来自副本数量**；复制换来的
+   不是额外保障，而是双份维护成本。
+2. 代价量级：+1.4~2.3% 落在单个 kernel，换算端到端约 0.1~0.3%，不划算。
+3. 反向收益：共享后 direct 与 legacy 的差分退化为**纯寻址测试**，定位"寻址错"与
+   "归约错"的能力更强。
+
+落地形态（PR-2 的第二个 commit）：抽出 `decode_online_softmax` 模板 + 取址策略契约，
+`ContiguousRows` / `PagedRows` 两份策略。无效行返回**共享内存零行**而非 `nullptr`，
+因此循环内无任何有效性分支。
+
+新增的验证（比原计划更强）：
+
+- 连续路径数值**逐位不变**（10 组几何的 fp16 位模式指纹，抽取前后完全一致）；
+- 变异检验第三项：**在共享循环里丢掉 online rescale**（两条路径同等出错）→ 逐位门禁
+  通过、**独立 oracle 捕获**。这正面验证了"共享归约 + 独立参考"分层门禁的必要性：
+  若只有逐位差分而没有独立参考，这一类错误会整体漏过。
+
+§10.1 中记录的测量方法与回归量级仍然有效，保留作为该决策的事实依据。
+
 ## 12. Approval
 
 ### 门禁自检
@@ -471,7 +497,7 @@ direct vs legacy 逐元素相等门禁**——任何漂移立即失败。该门�
 | # | 议题 | 决议 |
 |---|------|------|
 | Q1 | flat 参数 vs POD view | **flat**（§1 已补理由：逐元素相等门禁覆盖了传参顺序这一失败模式） |
-| Q2 | 共享 tile loop vs 复制 | **抽取共享 loop**；PR-1 必须附 `attention_decode` 前后性能对比，出现可测回归则退回复制 → **执行时该门禁被触发：实测 +1.4~2.3% 回归，已回退为复制实现（§10.1）** |
+| Q2 | 共享 tile loop vs 复制 | **抽取共享 loop**；PR-1 必须附 `attention_decode` 前后性能对比，出现可测回归则退回复制 → 执行时门禁触发（+1.4~2.3%，§10.1），短暂回退为复制；随后按 issue #8 判定**接受回归、改回共享循环**（§10.2）。最终形态为共享 |
 | Q3 | 非法块 id = 零行且参与 softmax | **冻结为稳定契约**；"设备端违规计数"仅作为可观测性 follow-up（需改 FFI，超出本任务） |
 | Q4 | direct vs legacy 逐元素相等 | **要求严格相等**（已复核包括非法块 id 在内的每个分支都逐位一致） |
 | Q5 | `num_q_heads % num_kv_heads` 校验位置 | **改在 C ABI 载入边界**（§7.1），不落在 kernel / `forwardPaged`；已作为独立 PR #6 提交 |
