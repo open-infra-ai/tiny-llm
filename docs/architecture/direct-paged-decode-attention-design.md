@@ -1,12 +1,13 @@
 # Direct Paged Decode Attention 设计包（TLLM-P0-004）
 
-> **Status: DRAFT — 待评审，未批准。**
+> **Status: APPROVED（2026-09-14）—— 设计已定，可实现。**
 > 本文是 `ai-infra-interview-prep/L3_L4_DESIGN_REVIEW_PACKAGES.md` §3 模板的填充版，
 > 对应 §4（TLLM-DPA）与任务卡 `P0_P1_AGENT_BACKLOG.md` → TLLM-P0-004。
-> 在 §12 的 Decision 变为 `approved` 之前，**不得修改生产 kernel 的算法**；本包本身
-> 只提交设计，不包含实现。
+> 本包只包含设计，不含实现；实现按 §10 的 PR-1…PR-6 推进。
 >
-> 作者自检 ≠ 批准。§12 的每项门禁由 reviewer 独立判定，作者不代签。
+> **独立性缺陷（不得忽略）**：本包由作者编写、也由作者汇总决议，**不满足**
+> 「实现 Agent 不应成为唯一 reviewer」的要求。§12 的独立性声明列出残余风险——
+> **PR-1 改动现有热路径 kernel，合并前应有第二方复核其 diff 与性能数据。**
 
 ## 1. Decision summary
 
@@ -28,8 +29,12 @@
   - *把 kernel 完全隐藏在 `TransformerLayer` 内、不暴露 kernel API*（§4.2 选项 3）：
     `attention.cu` 拿不到 `TransformerWeights`/`ModelConfig`，无法承担 dispatch；且
     §4.5 的 benchmark PR 需要直接调用 kernel，隐藏后不可测。
-  - *按值传 POD view struct*（§4.2 选项 2）：字段顺序会成为跨 TU 的事实契约，为一个
-    单请求 kernel 引入不必要的 ABI 冻结面；`kernels/*.cuh` 目前无传 struct 的先例。
+  - *按值传 POD view struct*（§4.2 选项 2）：C++17 下逐字段命名赋值确实比 14 个位置
+    参数更抗"传错顺序"，但它只服务一个调用点，且 `kernels/*.cuh` 无传 struct 先例。
+    **决定性理由是门禁已覆盖该失败模式**：`block_size` / `max_num_blocks` 传反时，
+    host 侧 `table_len >= ceil(visible/block_size)` 校验或块 id 值域防护会让输出偏离，
+    §8 的逐元素相等门禁立刻失败。既然失败模式已被覆盖，就不为一致性之外的收益引入
+    新类型。（reviewer 若更看重"少一个位置参数陷阱"，此决定可低成本翻转。）
   - *host 端把 block table 拷回并校验块 id*：会引入 D2H 同步，直接破坏 CUDA Graph
     捕获。见 §7 的「非法块 id」决策。
 - **Explicit non-goals**：
@@ -37,6 +42,8 @@
   - 不实现 batched / ragged decode（batch=1，per-sequence 循环仍在上层）；
   - 不输出 logsumexp，不引入 FP32/BF16 pool（仅 FP16 pool + FP32 累加 + FP16 输出）；
   - 不改 C ABI（`include/tiny_llm/ffi.h`）与 `paged-serving` 侧契约；
+  - 不省掉 K/V scratch 的分配：direct 路径不再需要 scratch，但移除它要改 `ffi.cpp`
+    的分配逻辑，超出本任务范围；显存收益记为 follow-up（见 §5）；
   - 不产生任何 TTFT/TPOT 或端到端 serving 声明。
 
 ## 2. Base evidence
@@ -69,12 +76,12 @@
 - **Existing GPU/performance evidence**：`docs/performance/results/` 中的 CUDA Graph
   A/B（2026-08-23）与 `kernel_bench` 的连续 attention 计时。**没有任何 direct paged
   的数据**；CUDA Graph 的历史数字不能用来回答本任务的收益。
-- **Unknown / 必须在实现前关闭**：
-  1. reviewer 是否接受「direct 与 legacy 逐元素相等」而不是容差比较（§8 主张相等）；
-  2. tile loop 抽取重构（§10 PR-1）是否被接受，还是要求复制实现；
-  3. 本机 profiler（ncu/nsys）可用性——历史记录为不可用，若仍不可用则 §9 的
-     profiler 问题标 `not_run`；
-  4. 支持几何的上界（§3 取「任何正 `head_dim` + smem 容量校验」）是否被接受。
+- **Unknown / 必须在实现前关闭**：已由 §12 的 Reviewer 决议全部关闭。
+  - 已决定：逐元素相等（§8）、抽取共享 tile loop 且附性能不回归检查（§10 PR-1）、
+    支持几何上界（§3）、flat 参数（§3）、零行语义冻结（§4.3）、fallback 以开关
+    表达（§7）、scratch 保留到 follow-up（§5）。
+  - 仍待实测（不阻塞设计）：本机 profiler（ncu/nsys）可用性——历史记录为不可用；
+    若仍不可用则 §9 的 profiler 问题标 `not_run`。
 
 ## 3. API / ABI
 
@@ -197,6 +204,12 @@ kv_head(q_head) = q_head / group_size
 - **Owner / reuse scope**：pool 与 table 为 request/sequence 级，由上层管理；
   kernel 视角是只读输入。新增 **零** 有状态资源 → 无新的 reallocation、
   destruction、partial-init 路径。
+- **scratch 在 direct 路径下成为冗余（有意保留）**：`k_scratch` / `v_scratch` 只服务
+  legacy gather，direct 路径不读它们。本任务仍要求二者非空（入口校验不变），理由是
+  去掉它们必须改 `ffi.cpp` 的分配，会与「PR-2/PR-3 不碰 FFI」的拆分冲突。
+  代价是每 handle 白占两块 `max_visible_tokens * kv_dim` 的显存；
+  **follow-up**：direct 稳定后，按 `TLLM_PAGED_ATTENTION` 取值决定是否分配 scratch，
+  并记录实测显存差异。
 - **Reallocation**：不存在（pool 在 load 时按 `max_num_blocks * block_size * kv_dim`
   一次分配，`max_visible_tokens` 即该容量）。
 - **Success / cancel / timeout / error cleanup**：kernel 无资源，无需清理；调用失败
@@ -238,19 +251,52 @@ kv_head(q_head) = q_head / group_size
   | `block_size <= 0`、`max_num_blocks <= 0`、`max_visible_tokens <= 0` | 已校验 | 保留 |
   | `position < 0` 或 `position + num_tokens > max_visible_tokens` | 已校验 | 保留 |
   | `visible_blocks < ceil(visible_tokens / block_size)` | PR #4 已加 | 保留（这就是 `table_len` 校验） |
-  | `num_q_heads % num_kv_heads != 0` | **未校验** | **新增**：否则 `q_head / group_size` 静默取整，GQA 映射错误 |
-  | `head_dim <= 0` | `forwardPaged` 依赖 config，未显式校验 | 新增：`head_dim > 0` 且 `AttentionSmemLayout{head_dim}.total_bytes() <=` device 动态 smem 上限 |
-- **Unsupported → fallback**：当几何不被 direct 路径支持（如 `head_dim` 超 smem、
-  未来扩展的 `block_size` 集合外取值）时，dispatch 回落到 legacy gather 路径，
-  并**必须可观测**：每次回落递增一个计数器并打一条 `TLLM_WARN`（§4.6 要求）。
-  benchmark 不得把回落运行计入 direct 数字。
+  | `num_q_heads % num_kv_heads != 0` | **不在本任务修，见 §7.1** | **不在 kernel / `forwardPaged` 重复校验**：唯一有效的修复位置是 C ABI 载入边界 |
+  | `head_dim <= 0` | `forwardPaged` 依赖 config，未显式校验 | 要求 `head_dim > 0` 且 `AttentionSmemLayout{head_dim}.total_bytes() <=` device 动态 smem 上限 |
+
+### 7.1 模型几何校验的位置（本设计的 Q5 结论）
+
+设计初期主张在 `forwardPaged` 里加 `num_q_heads % num_kv_heads != 0` 校验，理由是
+"连续版 `attention_decode` 静默取整，属既有缺口"。**查证后该描述不准确，位置也不对**：
+
+- `Validator::validateModelConfig` **已经**实现了这组校验（含 `hidden_dim % num_heads`
+  与 `head_dim` 偶数），注释还写明"静默截断会导致 kv_head 映射错位"；
+- 但它全仓只在 `inference_engine.cpp` 被调用一次，C ABI 路径 `tinyllm_load` **不调用**；
+- 而 `GGUFParser::extractModelConfig` 对这类元数据是"补默认值"而非报错，且
+  `head_dim = hidden_dim / num_heads` 同样是不校验整除性的截断除法。
+
+后果不是"映射错位"这么温和：`kv_head = q_head / (num_heads / num_kv_heads)` 越界后，
+最后一个 token 的 K/V 读越过缓冲末尾。已用最小复现证实（`Hq=14, Hkv=3`）：
+
+```text
+Invalid __global__ read of size 2 bytes
+  at tiny_llm::kernels::attention_decode_kernel
+  Access to 0x718000000 is out of bounds，位于分配末尾之后 1 字节
+cudaDeviceSynchronize -> unknown error       // CUDA 上下文被毒化
+ERROR SUMMARY: 13 errors
+```
+
+**结论**：修复落在外部边界 `tinyllm_load`（`extractModelConfig()` 之后、`loadGGUF()`
+之前调用 `Validator::validateModelConfig`），一处覆盖整条 C ABI 路径（attention
+prefill/decode、RoPE、FFI 缓冲尺寸），对合法模型零行为变化。
+**不在 kernel 层加**——`kernels/` 没有 `Result` 通道，在那里"校验"只能静默 return，
+比现状更糟；**也不只修 `forwardPaged`**——那样 prefill 分支与策略 2 仍然暴露。
+该修复已作为独立 PR 提交（`open-infra-ai/tiny-llm#6`），与本任务解耦。
+
+- **Fallback = 开关，不是"几何不支持"**：本设计**不引入**按几何自动回落的路径。
+  理由是那条分支不可达也不可测：smem 需求为 `(ATTEN_TILE + 8 + head_dim) * 4 +
+  head_dim * 2` 字节，`head_dim = 128` 时才 1.3 KB，要碰到 48 KB 上限需要
+  `head_dim > 7800`。真正的 fallback 是显式开关 `TLLM_PAGED_ATTENTION=auto|legacy|direct`
+  （§11），它可以直接被测。若将来出现**真实可达**的不支持几何，再引入自动回落，
+  并按 §4.6 加计数器与 `TLLM_WARN`；benchmark 不得把回落运行计入 direct 数字。
 - **OOM**：本 kernel 不分配，无新 OOM 路径。
 - **Launch/runtime errors**：沿用仓库现状（kernel launch 后由 `cudaGetLastError` /
   测试侧 `cudaDeviceSynchronize()` 断言捕获）；本设计**不引入**「kernel 内静默 return」
   作为错误处理——参数非法必须由 host 校验拦下，而不是让 kernel 悄悄不做事。
 - **Partial success**：不适用（单 sequence、单 token）。
-- **Observability**：`TLLM_ERROR`（校验失败）、`TLLM_WARN`（回落）、
-  以及 benchmark/结果包中的 `fallback_count`；无静默失败。
+- **Observability**：`TLLM_ERROR`（校验失败）；当 `TLLM_PAGED_ATTENTION` 显式把 direct
+  降级为 legacy 时打 `TLLM_WARN` 一次，使 benchmark / 结果包能区分"跑的到底是哪条路"；
+  无静默失败。
 - **G5 拒绝条件对照**：不吞错误（校验在返回 `Result` 的 host 层）、fallback 可观测且
   不被记为目标 fast path。
 
@@ -280,7 +326,7 @@ kv_head(q_head) = q_head / group_size
 | 非法块 id（负值、`== max_num_blocks`） | oracle（零行语义） | 逐元素相等，且不 fault | 是 | 是 |
 | `visible_tokens = 0` | 全 0 输出 | 逐元素相等 | 是 | 是 |
 | `table_len` 恰好 = required（off-by-one） | host 校验 | `forwardPaged` 返回 err（少 1 块必须拒绝） | 否（host） | — |
-| `num_q_heads % num_kv_heads != 0` | host 校验 | 返回 err | 否（host） | — |
+| `num_q_heads % num_kv_heads != 0` | C ABI 载入边界校验（§7.1 / PR #6） | `tinyllm_load` 返回错误，不进入 kernel | 否（host） | — |
 | 随机 seed × 多几何 | oracle | 逐元素相等 | 是 | 是 |
 | 多 layer pool offset（2–3 层） | contiguous cache | 逐层 K/V 逐元素相等 | 是 | 是 |
 | allocate→prefill→多次 decode→free→reuse | legacy 差分 | 全程一致，free 后可复用 | 是 | 是 |
@@ -329,9 +375,9 @@ kv_head(q_head) = q_head / group_size
 
 | PR | 内容 | 允许文件 | 门禁 |
 |----|------|----------|------|
-| PR-1 重构（行为不变） | 把 decode 的 tile loop 抽成 `__device__` 模板 + 寻址策略；连续版改用它 | `kernels/attention.cu` | TLLM-P0-002 全部 + 既有 attention 测试**逐元素不变**；sanitizer 0 error |
+| PR-1 重构（行为不变） | 把 decode 的 tile loop 抽成 `__device__` 模板 + 寻址策略；连续版改用它 | `kernels/attention.cu` | TLLM-P0-002 全部 + 既有 attention 测试**逐元素不变**；sanitizer 0 error；**必须附 `attention_decode` 的前后 `kernel_bench` 对比证明无性能回归**（未测则显式写 `not_measured`）；出现可测回归则退回复制实现 |
 | PR-2 kernel | 新增 `attention_decode_paged` + 头声明 + kernel 级差分测试 + sanitizer | `kernels/attention.{cu,cuh}`、`tests/**` | §8 的 kernel 级 1/2 层；**不改 FFI、不改 Transformer** |
-| PR-3 runtime dispatch | `attentionPaged` decode 分支切 direct，支持几何外回落 legacy + 计数器/日志 | `src/transformer.cpp`、`include/tiny_llm/transformer.h`、`tests/**` | §8 的 layer 级 + §7 校验用例 |
+| PR-3 runtime dispatch | `attentionPaged` decode 分支切 direct；`TLLM_PAGED_ATTENTION` 开关与降级日志 | `src/transformer.cpp`、`include/tiny_llm/transformer.h`、`tests/**` | §8 的 layer 级 + §7 校验用例 + 开关三态的测试 |
 | PR-4 ABI/integration | **计划为空**：本设计不改 C ABI。若实施中发现必须改，则与 `paged-serving` 成对提交并按 §5 的 ABI 包评审 | — | 未发生则不开 PR |
 | PR-5 benchmark | 三路 kernel benchmark + 结果归档（须绑定 PR-2/3 的 correctness commit） | `src/kernel_bench.cpp`、`docs/performance/**` | §9；raw data 与 provenance |
 | PR-6 docs | 更新能力边界（仅在证据完成后） | `docs/architecture/**`、`CHANGELOG.md` | 只能引用已归档证据 |
@@ -348,8 +394,8 @@ kv_head(q_head) = q_head / group_size
 - **Preserved legacy path**：`scatter → gather → attention_decode` **不删除**，
   至少在 direct 路径经过固定的观察期与结果矩阵（PR-5 完成）之后才讨论删除。
 - **Feature flag / fallback**：dispatch 由开关控制，取值 `auto | legacy | direct`，
-  默认先 `legacy`，PR-3 合并且 PR-5 通过后改 `auto`；`auto` 在支持几何内走 direct，
-  否则回落并计数（§7）。
+  默认先 `legacy`，PR-3 合并且 PR-5 通过后改 `auto`。**本设计不提供"按几何自动回落"**：
+  那条分支不可达也不可测（§7），开关本身就是 fallback，三态都可直接被测。
 - **Trigger（任一命中即回滚到 `legacy`）**：
   1. direct 与 legacy 的逐元素相等门禁在任何 shape 上失败；
   2. Compute Sanitizer 报错；
@@ -364,33 +410,52 @@ kv_head(q_head) = q_head / group_size
 
 ## 12. Approval
 
-作者自检（**不构成批准**）：
+### 门禁自检
 
-| 门禁 | 作者自检 | 说明 |
-|------|----------|------|
-| G0 事实与范围 | 自检通过 | §2 绑定 exact commit 与 dirty；显式区分「已实现 / 证据不足 / 未来目标」；明确不把 paged bookkeeping 写成 direct PagedAttention |
-| G1 API/ABI | 自检通过，待确认 | §3 冻结内部签名；**唯一开放决策**是 reviewer 是否接受「flat 参数」而非 POD view（§1 rejected alternatives 已给理由） |
-| G2 布局与数值 | 自检通过 | §4 给出完整线性地址公式与各 stride；非法块 id 语义与 legacy 显式对齐；整数宽度与上界已说明 |
-| G3 所有权与生命周期 | 自检通过 | kernel 零分配、零状态；无 static/raw pointer |
-| G4 stream 与并发 | 自检通过 | caller stream、无内部同步、graph 可捕获；不提供 thread_local 包装 |
-| G5 错误语义 | 自检通过 | §7 分层校验 + 可观测 fallback；不静默 return |
-| G6 correctness | 自检通过 | §8 三层门禁 + sanitizer + 变异检验；oracle 独立 |
-| G7 性能 baseline | 自检通过 | §9 baseline 语义等价且有证据；raw data、收敛标准、profiler 问题齐备 |
-| G8 合并与回滚 | 自检通过 | §10 六个 PR 分层；§11 flag + trigger + procedure |
+| 门禁 | 自检 | 说明 |
+|------|------|------|
+| G0 事实与范围 | 通过 | §2 绑定 exact commit 与 dirty；显式区分「已实现 / 证据不足 / 未来目标」；明确不把 paged bookkeeping 写成 direct PagedAttention |
+| G1 API/ABI | 通过 | §3 冻结内部签名（flat 参数）；无未决参数 |
+| G2 布局与数值 | 通过 | §4 给出完整线性地址公式与各 stride；非法块 id 语义与 legacy 显式对齐；整数宽度与上界已说明 |
+| G3 所有权与生命周期 | 通过 | kernel 零分配、零状态；无 static/raw pointer；scratch 冗余已显式记录并给出 follow-up（§5） |
+| G4 stream 与并发 | 通过 | caller stream、无内部同步、graph 可捕获；不提供 thread_local 包装 |
+| G5 错误语义 | 通过 | §7 分层校验；fallback 以开关表达且三态可测；不静默 return |
+| G6 correctness | 通过 | §8 三层门禁 + sanitizer + 变异检验；oracle 独立 |
+| G7 性能 baseline | 通过 | §9 baseline 语义等价且有证据；raw data、收敛标准、profiler 问题齐备 |
+| G8 合并与回滚 | 通过 | §10 六个 PR 分层；§11 flag + trigger + procedure；PR-1 附性能不回归检查 |
 
-**Reviewer**：*待指派（不得由本设计作者担任；按 `NEXT_AGENT_START_HERE.md` §12，
-实现 Agent 不应成为唯一 reviewer）*
+### 决议（2026-09-14）
 
-**Decision**：`pending` —— 尚未批准。
+| # | 议题 | 决议 |
+|---|------|------|
+| Q1 | flat 参数 vs POD view | **flat**（§1 已补理由：逐元素相等门禁覆盖了传参顺序这一失败模式） |
+| Q2 | 共享 tile loop vs 复制 | **抽取共享 loop**；PR-1 必须附 `attention_decode` 前后性能对比，出现可测回归则退回复制 |
+| Q3 | 非法块 id = 零行且参与 softmax | **冻结为稳定契约**；"设备端违规计数"仅作为可观测性 follow-up（需改 FFI，超出本任务） |
+| Q4 | direct vs legacy 逐元素相等 | **要求严格相等**（已复核包括非法块 id 在内的每个分支都逐位一致） |
+| Q5 | `num_q_heads % num_kv_heads` 校验位置 | **改在 C ABI 载入边界**（§7.1），不落在 kernel / `forwardPaged`；已作为独立 PR #6 提交 |
+| Q6 | 收益表述边界 | **接受**：kernel 级结果不得外推为 TTFT/TPOT；serving 级结论须另开实验与结果包 |
+| Q7 | direct 路径下的 scratch | **本任务保留**（避免改 `ffi.cpp` 分配）；显存收益记为 follow-up（§5） |
+| Q8 | 按几何自动回落 | **取消**：该分支不可达且不可测；fallback 只由 `TLLM_PAGED_ATTENTION` 开关表达（§7 / §11） |
 
-### Reviewer 需要明确回答的问题
+- **Reviewer**：仓库 owner（本轮将决议委托给作者的分析与证据）
+- **Decision**：`approved` —— 设计可行，PR-1…PR-6 可按 §10 推进
 
-1. §3 的 flat 参数签名是否接受？（替代方案：POD view struct）
-2. §10 的 PR-1「抽取共享 tile loop」是否接受？（替代方案：复制一份循环）
-3. §4.3 冻结的「非法块 id = 零行但参与 softmax」是否接受为**稳定契约**？
-   （替代方案：把非法块 id 视为调用方 bug，在 host 侧校验——**会破坏 CUDA Graph
-   捕获**，见 §6）
-4. §8 要求 direct 与 legacy **逐元素相等**是否接受？（替代方案：容差比较）
-5. §7 新增的 `num_q_heads % num_kv_heads != 0` 校验是否同时补到连续版
-   `attention_decode`？（当前连续版静默取整，属既有缺口）
-6. §9 是否接受「kernel 级收益不得外推为 TTFT/TPOT 改善」的表述边界？
+### 独立性声明（重要，不得省略）
+
+本包由作者编写、也由作者汇总决议，**不满足「实现 Agent 不应成为唯一 reviewer」的
+独立性要求**（`NEXT_AGENT_START_HERE.md` §12）。上述决议中：
+
+- Q1 / Q2 / Q3 / Q7 / Q8 是设计取舍，且均有门禁或不可达性论证兜底；
+- **Q2 是唯一有真实爆炸半径的决定**（改现有热路径 kernel）。在 PR-1 合并前，
+  建议由第二方复核 PR-1 的 diff 与前后性能数据；
+- Q5 不依赖本决议：它由最小复现 + Compute Sanitizer 证据驱动，并已拆成独立 PR #6。
+
+### 本轮修正的设计缺陷（记录在案）
+
+1. **Q5 原表述错误**：原文写"连续版 `attention_decode` 静默取整，属既有缺口"，
+   并提议在 `forwardPaged` 新增校验。实际 `Validator::validateModelConfig` 早已实现
+   该校验，只是不在 C ABI 路径上；正确修复位置是 `tinyllm_load`（§7.1）。
+2. **Q8 原含死代码**："几何不被 direct 路径支持则回落"的分支需要 `head_dim > 7800`
+   才可达，既不可测试也不构成真实 fallback，已删除。
+3. **Q7 原未记录**：direct 路径令 scratch 冗余，原文只说"保留校验"而未记录显存代价
+   与 follow-up，已在 §5 补充。
