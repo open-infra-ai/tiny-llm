@@ -6,13 +6,21 @@ All notable tracked releases of Tiny-LLM are recorded here.
 
 ### Added
 
+- `TLLM_PAGED_ATTENTION` 开关（`auto | legacy | direct`，大小写不敏感）与
+  `TransformerLayer::attentionPaged` 的 decode 路由：`direct` 时 decode 直接调用
+  `attention_decode_paged` 并**跳过 gather**；`legacy` 时保留原 gather + 连续 attention
+  路径；`auto` 当前等价于 `direct`（设计包 §7 已取消不可达的"按几何回落"分支）。
+  **默认（未设置）= legacy**，因此本变更不改变生产默认行为——按设计包 §11，默认值将在
+  PR-5 的三路 benchmark 通过后改为 `auto`。非法取值显式返回错误，不静默回退；
+  显式选择 legacy 时打一次 `TLLM_WARN`，便于 benchmark / 结果包区分实际走的路径。
+  prefill 一律保留 legacy 路径（设计包 §1 non-goals）。
 - `kernels/attention.{cuh,cu}::attention_decode_paged`（TLLM-P0-004）：decode 阶段直接
   按物理 K/V pool + block table 寻址的 attention，不再把可见窗口 gather 成连续
   scratch。语义与 "gather 到连续缓冲后调用 `attention_decode`" 完全等价——包括
   非法块 id 与 `b >= table_len` 一律按零行处理（零 K 行点积为 0、零 V 行贡献为 0，
   但仍参与 softmax 归一化）。`visible_tokens` 走 device int，launch 路径无 D2H、
-  无分配，保持 CUDA Graph 可捕获。**尚未接入 Transformer dispatch**（属后续 PR），
-  因此当前生产 decode 路径行为不变。
+  无分配，保持 CUDA Graph 可捕获。decode 路由由 `TLLM_PAGED_ATTENTION` 控制（见上一条），
+  默认 `legacy`，因此生产 decode 路径行为不变。
 - decode 的 online-softmax 循环抽取为 `decode_online_softmax` 模板 + 取址策略
   （`ContiguousRows` / `PagedRows`），连续 KV 与分页 KV 共用同一份归约循环。无效行
   由策略返回**共享内存零行**而不是 `nullptr`，循环内因此没有任何有效性分支，累加
@@ -61,12 +69,19 @@ All notable tracked releases of Tiny-LLM are recorded here.
 
 ### Tests
 
+- TLLM-P0-004 dispatch（8 项，`tests/test_paged_dispatch.cpp`）：用"共享 scratch 是否被
+  写入"直接观测路由结果——legacy 必须 gather（scratch 被覆写），direct 必须不碰
+  scratch；覆盖默认值=legacy、`auto`/`direct`、大小写不敏感、非法取值显式失败、
+  prefill 不受开关影响；并做**层级端到端**逐位比对（同一 pool 上 direct 与 legacy 的
+  decode 输出逐位相同，含连续多步）。变异检验：忽略开关一律 direct → 3 项失败；
+  dispatch 处把 `table_len` 传 0 → 层级逐位比对失败（max|diff| 0.011）；
+  非法取值静默回退 → 对应用例失败。
 - TLLM-P0-004 direct paged kernel（5 项）：direct 与 legacy 在同一 pool、同一块表、
   同一输入下**逐位相同**；`compute-sanitizer --tool memcheck` 0 error。变异检验三项：
   ① 块内偏移写错（`r+1`）→ 被逐位门禁捕获；② 去掉 `table_len` 防护 → 被短块表用例
   捕获；③ **在共享循环里丢掉 online rescale**（两条路径同等出错）→ 逐位门禁通过、由
   独立 oracle 捕获——这验证了"共享归约 + 独立参考"分层门禁的必要性。
-  边界：本变更只测 kernel 级接口，**未**接入 Transformer dispatch，也不产生任何
+  边界：本变更只测 kernel 级接口；dispatch 由另一条 commit 接入，也不产生任何
   性能数字（kernel 级收益必须由后续 benchmark PR 单独给出）。
 - TLLM-P0-002 oracle（8 项）：kernel 级与 layer 级 paged/contiguous 差分，覆盖
   block_size 1/16/32、跨块尾部、MHA/GQA/MQA、head_dim 32/64/128、绝对位置增量
