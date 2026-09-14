@@ -4,6 +4,17 @@ All notable tracked releases of Tiny-LLM are recorded here.
 
 ## [Unreleased]
 
+### Fixed
+
+- C ABI 路径（`tinyllm_load`）现在校验模型几何。此前只有 `InferenceEngine::Load`
+  调用 `Validator::validateModelConfig`，C ABI 完全不校验：`num_heads` 不被
+  `num_kv_heads` 整除时，attention kernel 的
+  `kv_head = q_head / (num_heads / num_kv_heads)` 会超出 `[0, num_kv_heads)`，
+  最后一个 token 的 K/V 读越过缓冲末尾——Compute Sanitizer 可复现的 illegal
+  address，会毒化整个 CUDA 上下文（不只是当次请求失败）。
+  `GGUFParser::extractModelConfig` 对这类元数据是"补默认值"而非报错，因此必须在
+  进入 kernel 前显式拒绝。校验位置在 `loadGGUF` 之前，对合法模型零行为变化。
+
 ### Changed
 
 - C ABI 正常 greedy 路径（`logprobs_k == 0`）现在在每个序列 layer forward 完成后把
@@ -23,6 +34,11 @@ All notable tracked releases of Tiny-LLM are recorded here.
 
 ### Tests
 
+- 新增 `tests/test_validator.cpp`（纯 host，无 GPU 也运行）：`validateModelConfig`
+  的 9 项单元测试（此前 `Validator` 零覆盖，含全部非整除 head 组合的穷举），
+  以及 2 项 C ABI 边界回归——用字节级构造的 GGUF 断言 `tinyllm_load` 拒绝
+  `14/3` 几何、且不误拒 `14/2`。变异检验：移除 `tinyllm_load` 中的校验调用会让
+  边界测试失败。
 - CUDA kernel 直接对照 CPU greedy（跨 block scan、同分 token、首项 NaN 与双行 batch）；
   batch final RMSNorm / LM head 对照逐行单 token 路径，转置 FP16 M=4 对照 reference。
   RoPE 每 token 位置数组以非连续、非单调位置逐元素对照 CPU half-split 参考。

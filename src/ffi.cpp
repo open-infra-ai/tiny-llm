@@ -18,6 +18,7 @@
 #include "tiny_llm/kv_cache.h"
 #include "tiny_llm/model_loader.h"
 #include "tiny_llm/transformer.h"
+#include "tiny_llm/validator.h"
 #include "w8a16_matmul.cuh"
 
 #include <cmath>
@@ -193,6 +194,21 @@ TinyLlmHandle *tinyllm_load(const char *model_path, const TinyLlmConfig *config,
             return nullptr;
         }
         h->config = cfg_result.value();
+
+        // 修复：C ABI 此前不校验模型几何，而 attention kernel 中
+        // kv_head(q_head) = q_head / (num_heads / num_kv_heads) 是整数除法。
+        // num_heads 不被 num_kv_heads 整除时 kv_head 会超出 [0, num_kv_heads)，
+        // 最后一个 token 的 K/V 读越过缓冲末尾——Compute Sanitizer 可复现的
+        // illegal address，会毒化整个 CUDA 上下文（不是仅这一次请求失败）。
+        // GGUFParser::extractModelConfig 对这类元数据是"补默认值"而非报错，
+        // 因此必须在进入 kernel 前显式拒绝。InferenceEngine::Load 早已校验同一组
+        // 条件（Validator::validateModelConfig），此处补齐 C ABI 路径。
+        auto config_valid = tiny_llm::Validator::validateModelConfig(h->config);
+        if (config_valid.isErr()) {
+            set_err(err_buf, err_buf_len,
+                    "tinyllm_load: invalid model config: " + config_valid.error());
+            return nullptr;
+        }
 
         // 加载权重（GGUF -> W8A16/FP16 上传 GPU）
         auto w_result = tiny_llm::ModelLoader::loadGGUF(model_path, h->config);
