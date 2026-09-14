@@ -13,6 +13,12 @@ All notable tracked releases of Tiny-LLM are recorded here.
   但仍参与 softmax 归一化）。`visible_tokens` 走 device int，launch 路径无 D2H、
   无分配，保持 CUDA Graph 可捕获。**尚未接入 Transformer dispatch**（属后续 PR），
   因此当前生产 decode 路径行为不变。
+- decode 的 online-softmax 循环抽取为 `decode_online_softmax` 模板 + 取址策略
+  （`ContiguousRows` / `PagedRows`），连续 KV 与分页 KV 共用同一份归约循环。无效行
+  由策略返回**共享内存零行**而不是 `nullptr`，循环内因此没有任何有效性分支，累加
+  表达式保持不变。该抽取会给 `attention_decode` 带来已测量的 **+1.4~2.3%** kernel
+  回归（最坏 +4.9%，同进程交替 A/B，见 issue #8 与设计包 §10.1）；之所以接受，是因为
+  复制方案唯一的风险（两份实现漂移）已由下面的"逐位相同"门禁自动覆盖。
 - `tests/test_paged_direct.cpp`：direct 路径的差分门禁——同一份 pool 上
   `attention_decode_paged` 与 legacy（scatter + gather + `attention_decode`）的输出
   **逐位相同**（12 组几何 × 3 seed），并另外对照独立 oracle；覆盖非法块 id、
@@ -56,8 +62,10 @@ All notable tracked releases of Tiny-LLM are recorded here.
 ### Tests
 
 - TLLM-P0-004 direct paged kernel（5 项）：direct 与 legacy 在同一 pool、同一块表、
-  同一输入下**逐位相同**；`compute-sanitizer --tool memcheck` 0 error。变异检验：
-  把块内偏移写错（`r+1`）会被逐位门禁捕获，去掉 `table_len` 防护会被短块表用例捕获。
+  同一输入下**逐位相同**；`compute-sanitizer --tool memcheck` 0 error。变异检验三项：
+  ① 块内偏移写错（`r+1`）→ 被逐位门禁捕获；② 去掉 `table_len` 防护 → 被短块表用例
+  捕获；③ **在共享循环里丢掉 online rescale**（两条路径同等出错）→ 逐位门禁通过、由
+  独立 oracle 捕获——这验证了"共享归约 + 独立参考"分层门禁的必要性。
   边界：本变更只测 kernel 级接口，**未**接入 Transformer dispatch，也不产生任何
   性能数字（kernel 级收益必须由后续 benchmark PR 单独给出）。
 - TLLM-P0-002 oracle（8 项）：kernel 级与 layer 级 paged/contiguous 差分，覆盖
