@@ -76,6 +76,46 @@ void attention_decode_paged(const half *__restrict__ query, const half *__restri
                             const int *device_visible_tokens, int block_size, int max_num_blocks,
                             int table_len, cudaStream_t stream = 0);
 
+// ============================================================================
+// Split-KV decode attention（TLLM-ATTN-SPLITKV）
+//
+// 把可见 KV **逻辑窗口**切成 num_splits 段，每段一个 block 独立归约（grid = (Hq, num_splits)），
+// 再由一个 combine kernel（grid = (Hq, 1)）按 online-softmax 合并式折成输出。动机是并行度：
+// 单 query decode 原本只有 Hq 这一个并行轴，实测 occupancy 8.33%、无任何资源饱和
+// （见 docs/architecture/decode-attention-splitkv-design.md §2）。
+//
+// 与 attention_decode / attention_decode_paged 的关系：
+//   - **语义等价**：两者是同一次归约的两种切分方式，输出差异仅来自 fp32 求和顺序；
+//   - **num_splits == 1 时逐位相同**（见 kernels/attention.cu 的 combine 注释），这条是
+//     重构正确性的回归锚点；
+//   - **CUDA Graph 可捕获**：段范围在 device 端由 *device_visible_* 派生，num_splits 是 host
+//     参数（grid 捕获时固定），partial 缓冲由调用方预分配、捕获期零分配零 D2H；
+//   - 两个既有入口**保持不变**（等价于单遍路径），因此既有调用点无需改动。
+//
+// partial_workspace 布局（device fp32，连续，无 padding）：
+//   offset(head, split) = (head * num_splits + split) * (2 + head_dim)
+//     [+0]         = m      该段最大 score（空段为 -FLT_MAX，combine 视作中性）
+//     [+1]         = l      该段 Σ exp
+//     [+2 .. +1+D] = acc[d] 该段 Σ exp * v
+//   total floats = num_q_heads * num_splits * (2 + head_dim)
+// 调用方负责分配（kernel 零分配、零状态）。每个 block 都会写自己的槽位，含空段。
+//
+// 前置条件：指针非空；num_q_heads > 0、num_kv_heads > 0、num_q_heads % num_kv_heads == 0；
+//   head_dim > 0；1 <= num_splits <= 65535（grid.y 上界）；num_splits == 1 为恒等切分。
+void attention_decode_splitkv(const half *__restrict__ query, const half *__restrict__ k_cache,
+                              const half *__restrict__ v_cache, half *__restrict__ output,
+                              float scale, int num_q_heads, int num_kv_heads,
+                              const int *__restrict__ device_visible_len, int head_dim,
+                              float *__restrict__ partial_workspace, int      num_splits,
+                              cudaStream_t stream = 0);
+
+void attention_decode_paged_splitkv(
+    const half *__restrict__ query, const half *__restrict__ k_pool_layer,
+    const half *__restrict__ v_pool_layer, const int *__restrict__ block_table,
+    half *__restrict__ output, float scale, int num_q_heads, int num_kv_heads, int head_dim,
+    const int *__restrict__ device_visible_tokens, int block_size, int max_num_blocks,
+    int table_len, float *__restrict__ partial_workspace, int num_splits, cudaStream_t stream = 0);
+
 // Prefill attention: full sequence with causal masking
 // Q: [S, Hq,  D]
 // K: [S, Hkv, D]
