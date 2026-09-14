@@ -375,8 +375,8 @@ prefill/decode、RoPE、FFI 缓冲尺寸），对合法模型零行为变化。
 
 | PR | 内容 | 允许文件 | 门禁 |
 |----|------|----------|------|
-| PR-1 重构（行为不变） | 把 decode 的 tile loop 抽成 `__device__` 模板 + 寻址策略；连续版改用它 | `kernels/attention.cu` | TLLM-P0-002 全部 + 既有 attention 测试**逐元素不变**；sanitizer 0 error；**必须附 `attention_decode` 的前后 `kernel_bench` 对比证明无性能回归**（未测则显式写 `not_measured`）；出现可测回归则退回复制实现 |
-| PR-2 kernel | 新增 `attention_decode_paged` + 头声明 + kernel 级差分测试 + sanitizer | `kernels/attention.{cu,cuh}`、`tests/**` | §8 的 kernel 级 1/2 层；**不改 FFI、不改 Transformer** |
+| PR-1 重构（行为不变） | ~~把 decode 的 tile loop 抽成共享模板~~ **已否决，未提交**：实测给 `attention_decode` 带来 +1.4~2.3% 可复现回归，按本节门禁回退。详见 §10.1 | — | — |
+| PR-2 kernel | 新增 `attention_decode_paged`（自持一份取址实现，复制归约循环）+ 头声明 + kernel 级差分测试 + sanitizer | `kernels/attention.{cu,cuh}`、`tests/**` | §8 的 kernel 级 1/2 层；**不改 FFI、不改 Transformer** |
 | PR-3 runtime dispatch | `attentionPaged` decode 分支切 direct；`TLLM_PAGED_ATTENTION` 开关与降级日志 | `src/transformer.cpp`、`include/tiny_llm/transformer.h`、`tests/**` | §8 的 layer 级 + §7 校验用例 + 开关三态的测试 |
 | PR-4 ABI/integration | **计划为空**：本设计不改 C ABI。若实施中发现必须改，则与 `paged-serving` 成对提交并按 §5 的 ABI 包评审 | — | 未发生则不开 PR |
 | PR-5 benchmark | 三路 kernel benchmark + 结果归档（须绑定 PR-2/3 的 correctness commit） | `src/kernel_bench.cpp`、`docs/performance/**` | §9；raw data 与 provenance |
@@ -408,6 +408,48 @@ prefill/decode、RoPE、FFI 缓冲尺寸），对合法模型零行为变化。
 - **G8 拒绝条件对照**：PR 已拆分；有 legacy fallback 与显式 flag；benchmark Agent
   不优化算法；不改 C ABI，因此不会单侧破坏 `paged-serving`。
 
+### 10.1 执行结果：PR-1 被门禁否决（2026-09-14）
+
+PR-1 计划把 decode 的 tile loop 抽成 `__device__` 模板 + 取址策略，让连续 KV 与分页
+KV 共用同一份 online softmax。**实测该抽取给生产 kernel 带来可复现的回归，因此按
+§10 的门禁回退为复制实现，PR-1 未提交。**
+
+测量过程中先后排除了三个会把结论带偏的因素，记在此处以免后人重蹈：
+
+1. 本机 GPU 空闲时 SM 时钟停在 **900/3090 MHz**，小 kernel 推不动 boost，逐次运行
+   差异可达 50%；
+2. 临时 scratch 程序默认编译到 **sm_75**，而生产构建用 `native`（sm_120）；
+3. 现成 harness 的 host-int 重载每次调用附带一次 4 字节 H2D memcpy。
+
+修正后的方法：时钟预热 4s + `-arch=native` + device-int 重载 + 大 S（512…2048）+
+顺序平衡交替 + **新旧 kernel 编入同一进程交替调用**（消除跨二进制代码布局这一最后的
+混淆）。
+
+结果（同进程 A/B，8 轮顺序平衡，两组独立重复）：
+
+| 几何 | Δ |
+|------|-----|
+| S=128 / 512 / 1024 / 2048（D=64, Hq=14） | +2.3% / −2.6% / +2.0% / +0.9% |
+| D=128, S=512 | **+4.9%** |
+| D=128, S=1024 / 2048 | +1.6% / +0.7% |
+| Hq=8, Hkv=1, S=1024 | +1.6% |
+
+两轮分别 7/8 与 6/8 几何为正，均值 +1.4% / +2.3%。SASS 对比：指令数相同（1168）、
+寄存器相同（56）、无 spill，但**指令调度与选择确有变化**——不是测量假象。
+
+期间尝试过两种规避写法，均未改变结论：策略按值 / 按引用传递；以及把"无效行"从
+`nullptr + 分支`改为返回**零行**（使共享循环完全无分支）。后者本身是实现上的更优形态
+（语义与 gather 写 0 构造性一致），仍测到同样回归——说明扰动来自抽取本身，而非某个
+具体写法。
+
+**结论**：PR-2 改为自持一份寻址实现（`attention_decode_paged_kernel` 复制归约循环，
+只替换 K/V 取址）。代价是两份实现必须保持数值一致；**缓解手段是 PR-2 新增的
+direct vs legacy 逐元素相等门禁**——任何漂移立即失败。该门禁比原计划的"纯寻址差分"
+更强：它要求两份**独立实现**逐位一致。
+
+若将来重新评估这一取舍，需要的是一个**不改变 `attention_decode` 代码生成的抽取方式**，
+而不是重测同一方案。
+
 ## 12. Approval
 
 ### 门禁自检
@@ -429,7 +471,7 @@ prefill/decode、RoPE、FFI 缓冲尺寸），对合法模型零行为变化。
 | # | 议题 | 决议 |
 |---|------|------|
 | Q1 | flat 参数 vs POD view | **flat**（§1 已补理由：逐元素相等门禁覆盖了传参顺序这一失败模式） |
-| Q2 | 共享 tile loop vs 复制 | **抽取共享 loop**；PR-1 必须附 `attention_decode` 前后性能对比，出现可测回归则退回复制 |
+| Q2 | 共享 tile loop vs 复制 | **抽取共享 loop**；PR-1 必须附 `attention_decode` 前后性能对比，出现可测回归则退回复制 → **执行时该门禁被触发：实测 +1.4~2.3% 回归，已回退为复制实现（§10.1）** |
 | Q3 | 非法块 id = 零行且参与 softmax | **冻结为稳定契约**；"设备端违规计数"仅作为可观测性 follow-up（需改 FFI，超出本任务） |
 | Q4 | direct vs legacy 逐元素相等 | **要求严格相等**（已复核包括非法块 id 在内的每个分支都逐位一致） |
 | Q5 | `num_q_heads % num_kv_heads` 校验位置 | **改在 C ABI 载入边界**（§7.1），不落在 kernel / `forwardPaged`；已作为独立 PR #6 提交 |
