@@ -359,9 +359,11 @@ out[d] = __float2half(ACC[d] * 1/(L + 1e-9))        // +1e-9 与乘法形式与�
 |---|------|----------|
 | Q1 | combine 用独立 kernel（本设计）还是单 kernel 信号量归约 | 建议**独立 kernel**：graph 下 launch 已摊销，复杂度更低 |
 | Q2 | `num_splits` 是 host 参数（本设计）还是编译期常数 | 建议 **host 参数**：捕获时固定即可，且允许调用方按上下文长度选择 |
-| Q3 | `num_splits > 1` 破坏「contiguous 逐位不变」门禁是否可接受 | **需要明确批准**：这是本任务唯一有真实爆炸半径的数值决定；建议接受，因为 §8 的 `num_splits = 1` 锚点覆盖了重构风险本身 |
+| Q3 | `num_splits > 1` 破坏「contiguous 逐位不变」门禁是否可接受 | **已批准（2026-09-14）**：这是本任务唯一有真实爆炸半径的数值决定。owner 在选择 split-KV 方案时已确认接受"输出不再与现状逐位相同、但仍在 oracle 容差内"，故不再单列阻塞项。§8 的 `num_splits = 1` 逐位锚点仍是合并的硬门禁 |
 | Q4 | partial 缓冲放 `LayerWorkspace`（本设计）还是复用 direct 路径已冗余的 `k_scratch` | 建议**新缓冲**：两者 dtype/语义不同，复用会把耦合藏起来；与设计包 §5 的 scratch follow-up 一并再议 |
 | Q5 | 小 S 是否允许回落到 `num_splits = 1` | 建议**允许由调用方选择**，不做内核内分支（内分支不可测） |
 
 - **Reviewer**：仓库 owner（本轮将决议委托给作者的分析与证据）
-- **Decision**：`changes_requested`（未批准前不得进入 PR-B 改 kernel）
+- **Decision**：`approved`（2026-09-14）—— owner 授权按 §10 的 PR-A…PR-D 推进。
+  **独立性缺陷仍然成立**（本包作者即实现者），因此 **PR-B / PR-C 合并前必须由第二方复核
+  diff 与前后性能数据**；Q1/Q2/Q4/Q5 按上表建议执行，若 reviewer 有异议可低成本翻转。
