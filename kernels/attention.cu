@@ -213,6 +213,165 @@ void attention_decode(const half *query, const half *k_cache, const half *v_cach
                      device_len.data(), head_dim, stream);
 }
 
+// ============================================================================
+// Direct paged decode attention（TLLM-P0-004）
+//
+// 与 attention_decode_kernel 的唯一区别是 K/V 取址：直接从物理 pool + block table
+// 寻址，不再把可见窗口 gather 成连续 scratch。
+//
+// 归约循环**刻意与连续版各自持有一份**，而不是抽成共享模板：设计包 §10 的 PR-1
+// 门禁要求"出现可测回归则退回复制实现"，而抽取共享循环实测在生产架构（sm_120，
+// 时钟预热 + 单进程交替 A/B）上给 attention_decode 带来 +1.4~2.3% 的可复现回归
+// （见 docs/architecture/direct-paged-decode-attention-design.md §10.1）。
+// 代价是两份实现必须保持数值一致——由 tests/test_paged_direct.cpp 的
+// direct vs legacy **逐元素相等**门禁守护，任何漂移都会立刻失败。
+// ============================================================================
+__global__ void attention_decode_paged_kernel(
+    const half *__restrict__ query, const half *__restrict__ k_pool_layer,
+    const half *__restrict__ v_pool_layer, const int *__restrict__ block_table,
+    half *__restrict__ output, float scale, int num_q_heads, int num_kv_heads, int head_dim,
+    const int *device_visible_tokens, int block_size, int max_num_blocks, int table_len) {
+    const int visible_tokens = *device_visible_tokens;
+    const int q_head = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+
+    const int group_size = num_q_heads / num_kv_heads;
+    const int kv_head = q_head / group_size;
+    const int kv_dim = num_kv_heads * head_dim;
+
+    // 本 head 在 pool 内的基址（layer 偏移已由 caller 加在指针上）
+    const half *k_base = k_pool_layer + kv_head * head_dim;
+    const half *v_base = v_pool_layer + kv_head * head_dim;
+    half       *o = output + q_head * head_dim;
+
+    extern __shared__ float smem[];
+    AttentionSmemLayout     layout{head_dim};
+    float                  *scores = smem + layout.scores_offset();
+    float                  *red = smem + layout.red_offset();
+    float                  *out_acc = smem + layout.out_acc_offset();
+    half                   *q_smem =
+        reinterpret_cast<half *>(reinterpret_cast<char *>(smem) + layout.q_offset_bytes());
+
+    // paged 专用共享内存（layout 之后）：
+    //   row_elem[ATTEND_TILE]  本 tile 每个逻辑 token 的行内元素偏移；-1 表示无效
+    //   zero_row[head_dim]     无效行使用的"零行"
+    char *tail = reinterpret_cast<char *>(smem) + layout.total_bytes();
+    int  *row_elem = reinterpret_cast<int *>(tail);
+    half *zero_row = reinterpret_cast<half *>(tail + ATTEND_TILE * sizeof(int));
+
+    // Cache Q for this head / zero the output accumulator / 初始化零行。
+    // 无效行返回零行而不是跳过，使语义与 paged_gather_blocks 的"非法块 id 写 0"
+    // 构造性一致：零 K 行点积为 0 → score = 0；零 V 行贡献为 0。
+    for (int d = tid; d < head_dim; d += nthreads) {
+        q_smem[d] = query[q_head * head_dim + d];
+        out_acc[d] = 0.0f;
+        zero_row[d] = __float2half(0.0f);
+    }
+    __syncthreads();
+
+    float running_max = -FLT_MAX;
+    float running_sum = 0.0f;
+
+    for (int tile_start = 0; tile_start < visible_tokens; tile_start += ATTEND_TILE) {
+        const int tile_size = min(ATTEND_TILE, visible_tokens - tile_start);
+
+        // 每 tile 一次性把逻辑 token 映射到 pool 行内偏移。放在 tile 级而不是
+        // step 4 的 (head_dim × tile_size) 内层循环里，避免反复做整数除法与块表读取。
+        // b >= table_len 与越界块 id 一律按无效行处理，因此不会越界读块表。
+        for (int i = tid; i < tile_size; i += nthreads) {
+            const int pos = tile_start + i;
+            const int b = pos / block_size;
+            const int r = pos - b * block_size;
+            const int p = (b < table_len) ? block_table[b] : -1;
+            row_elem[i] =
+                (p < 0 || p >= max_num_blocks)
+                    ? -1
+                    : static_cast<int>(
+                          (static_cast<size_t>(p) * block_size + static_cast<size_t>(r)) * kv_dim);
+        }
+        __syncthreads();
+
+        // Step 1: scores s_i = scale * (Q dot K_i) for this tile.
+        for (int i = tid; i < tile_size; i += nthreads) {
+            const int   e = row_elem[i];
+            const half *k_pos = (e < 0) ? zero_row : k_base + e;
+            float       score = 0.0f;
+            for (int d = 0; d < head_dim; ++d) {
+                score += __half2float(q_smem[d]) * __half2float(k_pos[d]);
+            }
+            scores[i] = score * scale;
+        }
+        __syncthreads();
+
+        // Step 2: tile max.
+        float m_tile = -FLT_MAX;
+        for (int i = tid; i < tile_size; i += nthreads) {
+            m_tile = fmaxf(m_tile, scores[i]);
+        }
+        m_tile = block_reduce_max_dyn(m_tile, red, nthreads);
+
+        // Step 3: online rescale.
+        const float m_new = fmaxf(running_max, m_tile);
+        const float old_rescale = __expf(running_max - m_new);
+
+        float sum_tile = 0.0f;
+        for (int i = tid; i < tile_size; i += nthreads) {
+            sum_tile += __expf(scores[i] - m_new);
+        }
+        sum_tile = block_reduce_sum_dyn(sum_tile, red, nthreads);
+
+        running_sum = running_sum * old_rescale + sum_tile;
+
+        // Step 4: update partial output.
+        for (int d = tid; d < head_dim; d += nthreads) {
+            float partial = 0.0f;
+            for (int i = 0; i < tile_size; ++i) {
+                const int   e = row_elem[i];
+                const half *v_pos = (e < 0) ? zero_row : v_base + e;
+                partial += __expf(scores[i] - m_new) * __half2float(v_pos[d]);
+            }
+            out_acc[d] = out_acc[d] * old_rescale + partial;
+        }
+
+        running_max = m_new;
+        __syncthreads();
+    }
+
+    // Final normalize.
+    const float inv_sum = 1.0f / (running_sum + 1e-9f);
+    for (int d = tid; d < head_dim; d += nthreads) {
+        o[d] = __float2half(out_acc[d] * inv_sum);
+    }
+}
+
+void attention_decode_paged(const half *query, const half *k_pool_layer, const half *v_pool_layer,
+                            const int *block_table, half *output, float scale, int num_q_heads,
+                            int num_kv_heads, int head_dim, const int *device_visible_tokens,
+                            int block_size, int max_num_blocks, int table_len,
+                            cudaStream_t stream) {
+    // 防御性检查（与文件内其他 kernel 一致）；真正的错误契约在 host 侧
+    // TransformerLayer::forwardPaged，参数非法不应依赖这里的静默 no-op。
+    if (query == nullptr || k_pool_layer == nullptr || v_pool_layer == nullptr ||
+        block_table == nullptr || output == nullptr || device_visible_tokens == nullptr) {
+        return;
+    }
+    if (num_q_heads <= 0 || num_kv_heads <= 0 || head_dim <= 0 || block_size <= 0 ||
+        max_num_blocks <= 0) {
+        return;
+    }
+
+    const int           num_blocks = num_q_heads;
+    const int           threads = 128;
+    AttentionSmemLayout layout{head_dim};
+    const size_t        shared_size = layout.total_bytes() + ATTEND_TILE * sizeof(int) +
+                               static_cast<size_t>(head_dim) * sizeof(half);
+
+    attention_decode_paged_kernel<<<num_blocks, threads, shared_size, stream>>>(
+        query, k_pool_layer, v_pool_layer, block_table, output, scale, num_q_heads, num_kv_heads,
+        head_dim, device_visible_tokens, block_size, max_num_blocks, table_len);
+}
+
 // Prefill attention: full sequence with causal masking.
 // Q: [S, Hq, D]; K/V: [S, Hkv, D].  One block per (query_pos, q_head).
 __global__ void attention_prefill_kernel(const half *__restrict__ query,
