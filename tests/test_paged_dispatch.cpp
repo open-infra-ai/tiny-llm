@@ -275,6 +275,43 @@ class PagedDispatchTest : public ::testing::Test {
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     }
 
+    // 构造"刚好能进入 attentionPaged"的最小视图并跑一次 decode。
+    // 供只验证**入口错误语义**（开关非法取值）的用例使用——这些用例关心的是路由前的
+    // 校验分支，不需要完整的 fixture。
+    static Result<void> runMinimalDecode(Fixture &f) {
+        buildModel(f);
+
+        f.hidden = f.config.hidden_dim;
+        f.kv_dim = f.config.num_kv_heads * f.config.head_dim;
+        const size_t pool_elems =
+            static_cast<size_t>(kMaxBlocks) * static_cast<size_t>(kBlockSize) * f.kv_dim;
+        f.k_pool = DeviceBuffer<half>(pool_elems);
+        f.v_pool = DeviceBuffer<half>(pool_elems);
+        f.k_scratch = DeviceBuffer<half>(pool_elems);
+        f.v_scratch = DeviceBuffer<half>(pool_elems);
+        f.hidden_a = DeviceBuffer<half>(static_cast<size_t>(f.config.max_seq_len) * f.hidden);
+        f.table = DeviceBuffer<int>(static_cast<size_t>(kMaxBlocks));
+
+        f.view.k_pool = f.k_pool.data();
+        f.view.v_pool = f.v_pool.data();
+        f.view.block_table = f.table.data();
+        f.view.k_scratch = f.k_scratch.data();
+        f.view.v_scratch = f.v_scratch.data();
+        f.view.visible_blocks = 1;
+        f.view.block_size = kBlockSize;
+        f.view.max_num_blocks = kMaxBlocks;
+        f.view.max_visible_tokens = kMaxBlocks * kBlockSize;
+        f.view.position = 0;
+        f.view.decode_len = nullptr;
+
+        const int         zero = 0;
+        DeviceBuffer<int> d_pos(1);
+        d_pos.copyFromHost(&zero, 1);
+
+        return f.layer->forwardPaged(f.hidden_a.data(), f.view, 1, d_pos.data(), f.d_cos.data(),
+                                     f.d_sin.data(), 0);
+    }
+
     // 把 scratch 全部写成哨兵值，用于观测 legacy 是否真的 gather 过。
     static void poisonScratch(Fixture &f) {
         const size_t      n = f.k_scratch.size();
@@ -417,38 +454,8 @@ TEST_F(PagedDispatchTest, DirectAndLegacyAgreeAcrossSteps) {
 TEST_F(PagedDispatchTest, InvalidModeValueFailsLoudly) {
     ScopedEnv env("TLLM_PAGED_ATTENTION", "direkt"); // 拼错
     Fixture   f;
-    buildModel(f);
+    auto      r = runMinimalDecode(f);
 
-    // 只需要进入 attentionPaged；先构造最小视图（指针非空即可通过前面的几何校验）
-    f.hidden = f.config.hidden_dim;
-    f.kv_dim = f.config.num_kv_heads * f.config.head_dim;
-    const size_t pool_elems =
-        static_cast<size_t>(kMaxBlocks) * static_cast<size_t>(kBlockSize) * f.kv_dim;
-    f.k_pool = DeviceBuffer<half>(pool_elems);
-    f.v_pool = DeviceBuffer<half>(pool_elems);
-    f.k_scratch = DeviceBuffer<half>(pool_elems);
-    f.v_scratch = DeviceBuffer<half>(pool_elems);
-    f.hidden_a = DeviceBuffer<half>(static_cast<size_t>(f.config.max_seq_len) * f.hidden);
-    f.table = DeviceBuffer<int>(static_cast<size_t>(kMaxBlocks));
-
-    f.view.k_pool = f.k_pool.data();
-    f.view.v_pool = f.v_pool.data();
-    f.view.block_table = f.table.data();
-    f.view.k_scratch = f.k_scratch.data();
-    f.view.v_scratch = f.v_scratch.data();
-    f.view.visible_blocks = 1;
-    f.view.block_size = kBlockSize;
-    f.view.max_num_blocks = kMaxBlocks;
-    f.view.max_visible_tokens = kMaxBlocks * kBlockSize;
-    f.view.position = 0;
-    f.view.decode_len = nullptr;
-
-    const int         zero = 0;
-    DeviceBuffer<int> d_pos(1);
-    d_pos.copyFromHost(&zero, 1);
-
-    auto r = f.layer->forwardPaged(f.hidden_a.data(), f.view, 1, d_pos.data(), f.d_cos.data(),
-                                   f.d_sin.data(), 0);
     ASSERT_TRUE(r.isErr()) << "非法 TLLM_PAGED_ATTENTION 取值必须返回错误，不得静默回退";
     EXPECT_NE(r.error().find("TLLM_PAGED_ATTENTION"), std::string::npos) << r.error();
 
@@ -480,4 +487,143 @@ TEST_F(PagedDispatchTest, PrefillIgnoresTheSwitch) {
     EXPECT_FALSE(scratchAllSentinel(f))
         << "prefill 必须保留 legacy 路径（设计包 §1 non-goals），gather 应当写过 scratch";
     freeModel(f);
+}
+
+// ── TLLM-ATTN-SPLITKV：开关语义与层级等价 ────────────────────────────────
+//
+// 层级门禁只覆盖"路由是否正确 + 两条路径在同一 num_splits 下是否等价"；
+// kernel 级数值正确性由 tests/test_attention_splitkv.cpp 负责（逐位锚点 + oracle）。
+
+namespace {
+
+// 在给定开关组合下建 fixture、跑一次 decode、取回该步层输出。
+// 每个组合用独立 fixture：buildFixture 的输入是固定种子，因此不同组合之间可直接比较。
+template <typename BuildFn>
+std::vector<half> decodeWith(const char *mode, const char *split, BuildFn &&run) {
+    ScopedEnv mode_env("TLLM_PAGED_ATTENTION", mode);
+    ScopedEnv split_env("TLLM_ATTN_SPLITKV", split);
+    return run();
+}
+
+} // namespace
+
+// 未设置 / "0" / "1" 都必须走**单遍入口**，三者逐位相同（且与开关引入前一致）。
+TEST_F(PagedDispatchTest, SplitKvOffByDefaultAndSingleSplitIsTheSinglePassPath) {
+    auto decode = [&](const char *split) {
+        ScopedEnv split_env("TLLM_ATTN_SPLITKV", split);
+        Fixture   f;
+        buildFixture(f);
+        auto out = runDecode(f, f.hidden_a, 0);
+        freeModel(f);
+        return out;
+    };
+
+    const auto unset = decode(nullptr);
+    const auto zero = decode("0");
+    const auto one = decode("1");
+
+    EXPECT_TRUE(bitwiseEqual(unset, zero)) << maxAbsDiff(unset, zero);
+    EXPECT_TRUE(bitwiseEqual(unset, one)) << maxAbsDiff(unset, one);
+}
+
+// 非法取值显式失败，不静默回退（G5）——包括非数字、带尾字符、超上界。
+TEST_F(PagedDispatchTest, InvalidSplitKvValueFailsLoudly) {
+    for (const char *bad : {"abc", "8x", "99", "+4"}) {
+        SCOPED_TRACE(std::string("TLLM_ATTN_SPLITKV=") + bad);
+        ScopedEnv split_env("TLLM_ATTN_SPLITKV", bad);
+        Fixture   f;
+        auto      r = runMinimalDecode(f);
+
+        ASSERT_TRUE(r.isErr()) << "非法 TLLM_ATTN_SPLITKV 取值必须返回错误，不得静默回退";
+        EXPECT_NE(r.error().find("TLLM_ATTN_SPLITKV"), std::string::npos) << r.error();
+        freeModel(f);
+    }
+}
+
+// 同一个 num_splits 下，legacy 与 direct 走同一份归约循环 ⇒ 层输出逐位相同。
+// （num_splits > 1 的确切切分由 kernel 级测试逐位锚定。）
+TEST_F(PagedDispatchTest, SplitKvLegacyAndDirectAgreeBitwiseAtSameSplits) {
+    for (const char *splits : {"2", "4", "8"}) {
+        SCOPED_TRACE(std::string("num_splits=") + splits);
+
+        auto legacy = decodeWith("legacy", splits, [&] {
+            Fixture f;
+            buildFixture(f);
+            auto out = runDecode(f, f.hidden_a, 0);
+            freeModel(f);
+            return out;
+        });
+        auto direct = decodeWith("direct", splits, [&] {
+            Fixture f;
+            buildFixture(f);
+            auto out = runDecode(f, f.hidden_b, 0);
+            freeModel(f);
+            return out;
+        });
+
+        EXPECT_TRUE(bitwiseEqual(legacy, direct))
+            << "同一 num_splits 下 legacy 与 direct 必须逐位相同，max|diff|="
+            << maxAbsDiff(legacy, direct);
+    }
+}
+
+// split 与单遍**不是**逐位关系（fp32 求和顺序不同），但必须在同一量级上：
+// 这里用相对尺度设一个宽松上限，作为"路由没有把数据接错"的冒烟检查；精确门禁在
+// tests/test_attention_splitkv.cpp。
+TEST_F(PagedDispatchTest, SplitKvChangesNumericsOnlySlightlyVersusSinglePass) {
+    auto decode = [&](const char *split) {
+        ScopedEnv split_env("TLLM_ATTN_SPLITKV", split);
+        Fixture   f;
+        buildFixture(f);
+        auto out = runDecode(f, f.hidden_a, 0);
+        freeModel(f);
+        return out;
+    };
+
+    const auto single = decode("1");
+    const auto split4 = decode("4");
+
+    const float diff = maxAbsDiff(single, split4);
+    float       scale = 0.0f;
+    for (half h : single)
+        scale = std::max(scale, std::fabs(__half2float(h)));
+
+    ASSERT_GT(scale, 0.0f) << "参考输出不应恒为 0";
+    EXPECT_LT(diff / scale, 5e-2f)
+        << "split 与单遍的差异相对尺度过大，疑似路由接错：max|diff|=" << diff << " scale=" << scale;
+}
+
+// prefill 与开关无关：即使 TLLM_ATTN_SPLITKV > 1，prefill 输出也必须逐位不变。
+// 结构上 use_split 以 is_decode 为前提，但这是设计包 §1 的 non-goal，值得钉住。
+TEST_F(PagedDispatchTest, SplitKvDoesNotAffectPrefill) {
+    auto run = [&](const char *split) {
+        ScopedEnv split_env("TLLM_ATTN_SPLITKV", split);
+        Fixture   f;
+        buildFixture(f);
+
+        DeviceBuffer<half> h(static_cast<size_t>(f.config.max_seq_len) * f.hidden);
+        const auto         input = randomFp16(h.size(), 999);
+        h.copyFromHost(input.data(), input.size());
+
+        const int         zero = 0;
+        DeviceBuffer<int> d_pos(1);
+        d_pos.copyFromHost(&zero, 1);
+        f.view.position = 0;
+        f.view.decode_len = nullptr;
+
+        auto r = f.layer->forwardPaged(h.data(), f.view, 4, d_pos.data(), f.d_cos.data(),
+                                       f.d_sin.data(), 0);
+        EXPECT_TRUE(r.isOk()) << r.error();
+        EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+        std::vector<half> out(h.size());
+        CUDA_CHECK(
+            cudaMemcpy(out.data(), h.data(), h.size() * sizeof(half), cudaMemcpyDeviceToHost));
+        return out;
+    };
+
+    const auto off = run("1");
+    const auto on = run("4");
+    EXPECT_TRUE(bitwiseEqual(off, on))
+        << "prefill 不得受 split-KV 开关影响，max|diff|=" << maxAbsDiff(off, on);
 }

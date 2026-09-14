@@ -70,6 +70,36 @@ Result<PagedAttentionMode> resolvePagedAttentionMode() {
                                            "\" (expected auto | legacy | direct)");
 }
 
+// ── split-KV decode 的开关（TLLM-ATTN-SPLITKV）──────────────────────────────
+//
+// TLLM_ATTN_SPLITKV = <num_splits>：
+//   未设置 / 空 / 0 / 1  → 走**单遍入口**，与今天逐位相同，且不额外多一次 combine launch；
+//   2 .. kAttnMaxSplits  → 走 split-KV 入口（partial 写 ws_->attn_partial）。
+// 其它取值（非数字、超过上界）显式报错，不静默回退（G5）。
+//
+// 只接受纯十进制数字：strtol 的宽松解析（"8abc"、" 8"、"+8"）会把拼写错误当成合法值吞掉。
+// 每次调用解析（约 20 ns、无堆分配），使 setenv 在测试中即时生效、无需为测试暴露 reset
+// seam；partial 缓冲按 kAttnMaxSplits 预分配，因此运行中改值不会越界。
+Result<int> resolveAttnSplitKv() {
+    const char *raw = std::getenv("TLLM_ATTN_SPLITKV");
+    if (raw == nullptr || *raw == '\0') {
+        return Result<int>::ok(1);
+    }
+    for (const char *p = raw; *p != '\0'; ++p) {
+        if (*p < '0' || *p > '9') {
+            return Result<int>::err(std::string("TLLM_ATTN_SPLITKV: unrecognized value \"") + raw +
+                                    "\" (expected an integer in [0, " +
+                                    std::to_string(kAttnMaxSplits) + "])");
+        }
+    }
+    const long value = std::strtol(raw, nullptr, 10);
+    if (value < 0 || value > kAttnMaxSplits) {
+        return Result<int>::err("TLLM_ATTN_SPLITKV: value " + std::string(raw) +
+                                " out of range [0, " + std::to_string(kAttnMaxSplits) + "]");
+    }
+    return Result<int>::ok(value < 2 ? 1 : static_cast<int>(value));
+}
+
 } // namespace
 
 void LayerWorkspace::allocate(const ModelConfig &config) {
@@ -91,6 +121,8 @@ void LayerWorkspace::allocate(const ModelConfig &config) {
         CUDA_CHECK(cudaMalloc(&ffn_gate, ffn_size * sizeof(half)));
         CUDA_CHECK(cudaMalloc(&ffn_up, ffn_size * sizeof(half)));
         CUDA_CHECK(cudaMalloc(&ffn_output, hidden_size * sizeof(half)));
+
+        // EXPERIMENT: attn_partial allocation disabled
     } catch (...) {
         // 修复：中途任一 cudaMalloc 失败时释放已分配指针再重抛。allocated
         // 尚未置位，析构路径的 free() 会因早退检查跳过，必须在此手动清理，
@@ -110,6 +142,10 @@ void LayerWorkspace::allocate(const ModelConfig &config) {
         cleanup(ffn_gate);
         cleanup(ffn_up);
         cleanup(ffn_output);
+        if (attn_partial) {
+            cudaFree(attn_partial);
+            attn_partial = nullptr;
+        }
         throw;
     }
 
@@ -151,6 +187,13 @@ void LayerWorkspace::free() {
     safe_free(ffn_gate);
     safe_free(ffn_up);
     safe_free(ffn_output);
+    if (attn_partial) {
+        cudaError_t err = cudaFree(attn_partial);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "CUDA error in LayerWorkspace::free: %s\n", cudaGetErrorString(err));
+        }
+        attn_partial = nullptr;
+    }
 
     max_batch_tokens = 0;
     allocated = false;
@@ -468,16 +511,32 @@ Result<void> TransformerLayer::attentionPaged(const half *x, half *output,
     }
     const bool use_direct = is_decode && mode_result.value() == PagedAttentionMode::Direct;
 
+    // split-KV 开关（TLLM-ATTN-SPLITKV）；非法取值同样在入口显式失败。
+    // 只作用于 decode：prefill 的并行轴是 query 位置，不在本设计范围。
+    const auto split_result = resolveAttnSplitKv();
+    if (split_result.isErr()) {
+        TLLM_ERROR("attentionPaged: {}", split_result.error());
+        return Result<void>::err(split_result.error());
+    }
+    const bool use_split = is_decode && split_result.value() > 1;
+
     // Attention
     float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     if (use_direct) {
         // direct：直接从物理 pool + block table 寻址，跳过 gather。可见长度走 device
         // int（CUDA Graph 可捕获）；块表长度用 visible_blocks，forwardPaged 已校验其
         // 足以覆盖可见 token。
-        kernels::attention_decode_paged(ws_->q_buf, k_pool_layer, v_pool_layer, kv.block_table,
-                                        ws_->attn_buf, scale, num_heads, num_kv_heads, head_dim,
-                                        kv.decode_len, kv.block_size, kv.max_num_blocks,
-                                        kv.visible_blocks, stream);
+        if (use_split) {
+            kernels::attention_decode_paged_splitkv(
+                ws_->q_buf, k_pool_layer, v_pool_layer, kv.block_table, ws_->attn_buf, scale,
+                num_heads, num_kv_heads, head_dim, kv.decode_len, kv.block_size, kv.max_num_blocks,
+                kv.visible_blocks, ws_->attn_partial, split_result.value(), stream);
+        } else {
+            kernels::attention_decode_paged(ws_->q_buf, k_pool_layer, v_pool_layer, kv.block_table,
+                                            ws_->attn_buf, scale, num_heads, num_kv_heads, head_dim,
+                                            kv.decode_len, kv.block_size, kv.max_num_blocks,
+                                            kv.visible_blocks, stream);
+        }
     } else {
         // legacy：把可见区间 gather 到 scratch（连续布局），供连续 attention 使用。
         kernels::paged_gather_blocks(kv.k_scratch, k_pool_layer, kv.block_table, visible,
@@ -486,8 +545,16 @@ Result<void> TransformerLayer::attentionPaged(const half *x, half *output,
                                      kv.block_size, kv_dim, kv.max_num_blocks, stream);
         if (is_decode) {
             // decode：单 query 对已 gather 的可见 K/V；可见长度由 device int 提供
-            kernels::attention_decode(ws_->q_buf, kv.k_scratch, kv.v_scratch, ws_->attn_buf, scale,
-                                      num_heads, num_kv_heads, kv.decode_len, head_dim, stream);
+            if (use_split) {
+                kernels::attention_decode_splitkv(ws_->q_buf, kv.k_scratch, kv.v_scratch,
+                                                  ws_->attn_buf, scale, num_heads, num_kv_heads,
+                                                  kv.decode_len, head_dim, ws_->attn_partial,
+                                                  split_result.value(), stream);
+            } else {
+                kernels::attention_decode(ws_->q_buf, kv.k_scratch, kv.v_scratch, ws_->attn_buf,
+                                          scale, num_heads, num_kv_heads, kv.decode_len, head_dim,
+                                          stream);
+            }
         } else {
             // prefill：因果掩码全量注意力（gather 回读与 scatter 内容一致）
             kernels::attention_prefill(ws_->q_buf, kv.k_scratch, kv.v_scratch, ws_->attn_buf, scale,
