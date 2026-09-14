@@ -535,7 +535,9 @@ TEST_F(SplitKvTest, GraphReplayWithGrowingVisibleMatchesEager) {
     ASSERT_EQ(cudaStreamEndCapture(s, &graph), cudaSuccess);
     ASSERT_NE(graph, nullptr);
     cudaGraphExec_t exec = nullptr;
-    ASSERT_EQ(cudaGraphInstantiate(&exec, graph, 0), cudaSuccess);
+    // 用 InstantiateWithFlags（CUDA 11.4 起）：三参数的 cudaGraphInstantiate 重载是 CUDA 12+
+    // 才有的，而 CI 跑在 CUDA 11.8 上（本地是 13.3）；五参数旧式在 CUDA 13 已不保证存在。
+    ASSERT_EQ(cudaGraphInstantiateWithFlags(&exec, graph, 0), cudaSuccess);
 
     // replay：可见长度逐个增长（同一 graph，grid 不变）
     for (int visible : {1, 7, 17, 33, 64, max_visible}) {
