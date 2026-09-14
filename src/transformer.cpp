@@ -201,6 +201,17 @@ Result<void> TransformerLayer::forwardPaged(half *hidden_states, const PagedKVCa
                    kv.position, num_tokens, kv.max_visible_tokens);
         return Result<void>::err("forwardPaged: position exceeds max_visible_tokens");
     }
+    // 块表长度 contract（TLLM-P0-002）：可见 token 数由 decode/prefill 分支决定，
+    // visible_blocks 必须足以寻址全部可见 token，否则 paged_gather_blocks 会越界
+    // 读 block_table（未定义行为）。与 src/ffi.cpp 的 need_blocks 检查同源。
+    const int visible_tokens =
+        (num_tokens == 1 && kv.decode_len != nullptr) ? (kv.position + 1) : num_tokens;
+    const int required_blocks = (visible_tokens + kv.block_size - 1) / kv.block_size;
+    if (kv.visible_blocks < required_blocks) {
+        TLLM_ERROR("forwardPaged: visible_blocks {} < required {} (visible {} / block_size {})",
+                   kv.visible_blocks, required_blocks, visible_tokens, kv.block_size);
+        return Result<void>::err("forwardPaged: block table too short");
+    }
 
     // Attention sublayer with residual: x = x + attention(rms_norm(x))
     rmsNorm(hidden_states, weights_.rms_att_weight, ws_->norm_output, num_tokens, stream);
