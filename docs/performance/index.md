@@ -35,6 +35,23 @@
 2026-08-18 schema v1 和 kernel microbench 只保留为优化沿革，不与 schema v2 混算；
 见 [2026-08-18-decode-optimization](results/2026-08-18-decode-optimization.md)。
 
+## kernel 级基准：direct paged decode 三路对比（2026-09-14，schema `tllm-dpa-kernel-bench-v1`）
+
+`tiny_llm_kernel_bench --dpa-bench` 在**同一份逻辑 K/V** 上比较 `legacy`
+（gather ×2 + 连续 attention）、`contiguous`（连续 attention，上界参考）与 `direct`
+（`attention_decode_paged`），并单独报告两条 gather 的耗时。正确性逐位相等（32/32）
+先于计时。
+
+| 项 | 值 |
+|----|----|
+| 硬件 | RTX 5070 Ti 16GB（sm_120），CUDA 13.3.73 / 驱动 615.65.06 |
+| commit | `b6f6138`（clean）；被测 kernel 为 `ce93564`（PR-3 / #9） |
+| 采样 | 每样本 100 次调用均值 × 1000 次/repeat × 3 repeat；4 s 时钟预热；32 shape 中 17 个收敛 |
+| 结论 | **`direct` 在 `visible ≤ 128` 更快（主要省 2 次 launch），在 `visible ≥ 512` 慢 3%–15%；不支持把默认值改为 `auto`，默认保持 `legacy`** |
+
+完整表格、分解、收敛限制与 ncu 证据见
+[2026-09-14-rtx5070ti-dpa](results/2026-09-14-rtx5070ti-dpa.md)。
+
 ## 章节
 
 - [基准测试](./benchmarks) - 基准测试方法与计划
