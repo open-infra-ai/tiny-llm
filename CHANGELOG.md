@@ -4,8 +4,51 @@ All notable tracked releases of Tiny-LLM are recorded here.
 
 ## [Unreleased]
 
+### Added
+
+- `TLLM_PAGED_ATTENTION` 开关（`auto | legacy | direct`，大小写不敏感）与
+  `TransformerLayer::attentionPaged` 的 decode 路由：`direct` 时 decode 直接调用
+  `attention_decode_paged` 并**跳过 gather**；`legacy` 时保留原 gather + 连续 attention
+  路径；`auto` 当前等价于 `direct`（设计包 §7 已取消不可达的"按几何回落"分支）。
+  **默认（未设置）= legacy**，因此本变更不改变生产默认行为——按设计包 §11，默认值将在
+  PR-5 的三路 benchmark 通过后改为 `auto`。非法取值显式返回错误，不静默回退；
+  显式选择 legacy 时打一次 `TLLM_WARN`，便于 benchmark / 结果包区分实际走的路径。
+  prefill 一律保留 legacy 路径（设计包 §1 non-goals）。
+- `kernels/attention.{cuh,cu}::attention_decode_paged`（TLLM-P0-004）：decode 阶段直接
+  按物理 K/V pool + block table 寻址的 attention，不再把可见窗口 gather 成连续
+  scratch。语义与 "gather 到连续缓冲后调用 `attention_decode`" 完全等价——包括
+  非法块 id 与 `b >= table_len` 一律按零行处理（零 K 行点积为 0、零 V 行贡献为 0，
+  但仍参与 softmax 归一化）。`visible_tokens` 走 device int，launch 路径无 D2H、
+  无分配，保持 CUDA Graph 可捕获。decode 路由由 `TLLM_PAGED_ATTENTION` 控制（见上一条），
+  默认 `legacy`，因此生产 decode 路径行为不变。
+- decode 的 online-softmax 循环抽取为 `decode_online_softmax` 模板 + 取址策略
+  （`ContiguousRows` / `PagedRows`），连续 KV 与分页 KV 共用同一份归约循环。无效行
+  由策略返回**共享内存零行**而不是 `nullptr`，循环内因此没有任何有效性分支，累加
+  表达式保持不变。该抽取会给 `attention_decode` 带来已测量的 **+1.4~2.3%** kernel
+  回归（最坏 +4.9%，同进程交替 A/B，见 issue #8 与设计包 §10.1）；之所以接受，是因为
+  复制方案唯一的风险（两份实现漂移）已由下面的"逐位相同"门禁自动覆盖。
+- `tests/test_paged_direct.cpp`：direct 路径的差分门禁——同一份 pool 上
+  `attention_decode_paged` 与 legacy（scatter + gather + `attention_decode`）的输出
+  **逐位相同**（12 组几何 × 3 seed），并另外对照独立 oracle；覆盖非法块 id、
+  `visible_tokens = 0`、块表长度不足、多 layer pool offset。
+- `tests/paged_attention_oracle.h`（TLLM-P0-002）：不依赖外部 GGUF 的
+  paged/contiguous synthetic correctness oracle。纯 host 参考实现，冻结 paged KV
+  地址公式、块表长度 contract 与 GQA 映射，并独立计算 fp32 decode attention；
+  **不调用** `paged_gather_blocks` / `paged_scatter_blocks` / `attention_decode`。
+- `tests/test_paged_oracle.cpp`：上述 oracle 的 kernel 级与 layer 级差分门禁。
+  kernel 级把生产 scatter + gather + attention_decode 对照独立参考；layer 级把
+  `TransformerLayer::forwardPaged` 的 pool 内容按冻结公式读回，与连续 KV cache
+  的可见 K/V 做逐层位级比较。
+
 ### Fixed
 
+- `TransformerLayer::forwardPaged` 增加块表长度校验：`visible_blocks` 必须
+  `>= ceil(visible_tokens / block_size)`，否则返回错误。此前过短的块表会让
+  `paged_gather_blocks` 越界读 `block_table`（未定义行为）；该 contract 已由
+  `src/ffi.cpp` 的 `need_blocks` 检查使用，现下移到层入口。
+- `KVCacheManager::create` 显式把 `append_pos_` 清零（与 `memory_pool_` 的
+  `cudaMemset` 约定一致）。此前依赖 `cudaMalloc` 返回清零内存：调用方未先
+  `setAppendPos` 时，`appendKV` 会按未初始化值把 K/V 写到错误位置。
 - C ABI 路径（`tinyllm_load`）现在校验模型几何。此前只有 `InferenceEngine::Load`
   调用 `Validator::validateModelConfig`，C ABI 完全不校验：`num_heads` 不被
   `num_kv_heads` 整除时，attention kernel 的
@@ -34,6 +77,27 @@ All notable tracked releases of Tiny-LLM are recorded here.
 
 ### Tests
 
+- TLLM-P0-004 dispatch（8 项，`tests/test_paged_dispatch.cpp`）：用"共享 scratch 是否被
+  写入"直接观测路由结果——legacy 必须 gather（scratch 被覆写），direct 必须不碰
+  scratch；覆盖默认值=legacy、`auto`/`direct`、大小写不敏感、非法取值显式失败、
+  prefill 不受开关影响；并做**层级端到端**逐位比对（同一 pool 上 direct 与 legacy 的
+  decode 输出逐位相同，含连续多步）。变异检验：忽略开关一律 direct → 3 项失败；
+  dispatch 处把 `table_len` 传 0 → 层级逐位比对失败（max|diff| 0.011）；
+  非法取值静默回退 → 对应用例失败。
+- TLLM-P0-004 direct paged kernel（5 项）：direct 与 legacy 在同一 pool、同一块表、
+  同一输入下**逐位相同**；`compute-sanitizer --tool memcheck` 0 error。变异检验三项：
+  ① 块内偏移写错（`r+1`）→ 被逐位门禁捕获；② 去掉 `table_len` 防护 → 被短块表用例
+  捕获；③ **在共享循环里丢掉 online rescale**（两条路径同等出错）→ 逐位门禁通过、由
+  独立 oracle 捕获——这验证了"共享归约 + 独立参考"分层门禁的必要性。
+  边界：本变更只测 kernel 级接口；dispatch 由另一条 commit 接入，也不产生任何
+  性能数字（kernel 级收益必须由后续 benchmark PR 单独给出）。
+- TLLM-P0-002 oracle（8 项）：kernel 级与 layer 级 paged/contiguous 差分，覆盖
+  block_size 1/16/32、跨块尾部、MHA/GQA/MQA、head_dim 32/64/128、绝对位置增量
+  scatter、多 layer pool offset、非法块 id 与过短块表、随机 seed；oracle 已做变异
+  检验（破坏 scatter 位置写入或 layer 步长会分别被对应门禁捕获），
+  `compute-sanitizer --tool memcheck` 0 error。边界：被测路径仍是
+  scatter → gather → continuous attention，**不是** direct PagedAttention；
+  本变更不产生任何性能数字。
 - 新增 `tests/test_validator.cpp`（纯 host，无 GPU 也运行）：`validateModelConfig`
   的 9 项单元测试（此前 `Validator` 零覆盖，含全部非整除 head 组合的穷举），
   以及 2 项 C ABI 边界回归——用字节级构造的 GGUF 断言 `tinyllm_load` 拒绝

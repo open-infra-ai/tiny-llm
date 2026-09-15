@@ -1,0 +1,892 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-14",
+  "title": "TLLM-P0-004 PR-5 three-way decode attention kernel benchmark",
+  "gpu": {
+    "name": "NVIDIA GeForce RTX 5070 Ti",
+    "total_memory_mib": 16275,
+    "compute_capability": "12.0"
+  },
+  "cuda_driver_version": 13040,
+  "cuda_runtime_version": 13030,
+  "build_type": "RelWithDebInfo/Release (NDEBUG)",
+  "geometry": {
+    "num_q_heads": 14,
+    "num_kv_heads": 2,
+    "head_dim": 64
+  },
+  "commit": "b6f6138e498b25662f3cad8110599b2e7ae545ec",
+  "dirty_files": "0",
+  "nvcc": "Build cuda_13.3.r13.3/compiler.38244171_0",
+  "cuda_arch_flag": "-arch=native",
+  "config": {
+    "warmup": 20,
+    "reps": 1000,
+    "batch": 100,
+    "repeats": 3,
+    "seed": 20260914,
+    "clock_warmup_s": 4.0
+  },
+  "equivalence": {
+    "shapes": 32,
+    "bitwise_failures": 0,
+    "max_abs_diff": 0
+  },
+  "convergence": {
+    "total_shapes": 32,
+    "comparison_paths_converged": 17,
+    "comparison_paths_not_converged": 15,
+    "not_converged_shapes": [
+      {
+        "visible_tokens": 8,
+        "block_size": 16,
+        "reason": "direct CV > 10%"
+      },
+      {
+        "visible_tokens": 15,
+        "block_size": 16,
+        "reason": "contiguous CV > 10%"
+      },
+      {
+        "visible_tokens": 16,
+        "block_size": 16,
+        "reason": "direct CV > 10%"
+      },
+      {
+        "visible_tokens": 17,
+        "block_size": 16,
+        "reason": "direct CV > 10%"
+      },
+      {
+        "visible_tokens": 31,
+        "block_size": 16,
+        "reason": "contiguous CV > 10%"
+      },
+      {
+        "visible_tokens": 32,
+        "block_size": 16,
+        "reason": "direct CV > 10%"
+      },
+      {
+        "visible_tokens": 33,
+        "block_size": 16,
+        "reason": "contiguous CV > 10%"
+      },
+      {
+        "visible_tokens": 63,
+        "block_size": 16,
+        "reason": "direct CV > 10%"
+      },
+      {
+        "visible_tokens": 65,
+        "block_size": 16,
+        "reason": "contiguous CV > 10%"
+      },
+      {
+        "visible_tokens": 8,
+        "block_size": 32,
+        "reason": "direct CV > 10%"
+      },
+      {
+        "visible_tokens": 31,
+        "block_size": 32,
+        "reason": "contiguous CV > 10%"
+      },
+      {
+        "visible_tokens": 32,
+        "block_size": 32,
+        "reason": "contiguous CV > 10%"
+      },
+      {
+        "visible_tokens": 33,
+        "block_size": 32,
+        "reason": "contiguous CV > 10%"
+      },
+      {
+        "visible_tokens": 63,
+        "block_size": 32,
+        "reason": "contiguous CV > 10%"
+      },
+      {
+        "visible_tokens": 65,
+        "block_size": 32,
+        "reason": "contiguous CV > 10%"
+      }
+    ],
+    "gathers_converged_shapes": 1
+  },
+  "headline": {
+    "direct_faster_at_visible_le_128_block16": true,
+    "direct_slower_at_visible_ge_512": true,
+    "first_block16_shape_where_direct_is_slower": {
+      "visible_tokens": 512,
+      "legacy_over_direct": 0.9686
+    },
+    "decision": "do_not_flip_default_to_auto"
+  },
+  "shapes": [
+    {
+      "visible_tokens": 8,
+      "block_size": 16,
+      "table_len": 1,
+      "gather_k_ms": 0.004959,
+      "gather_v_ms": 0.00494,
+      "contiguous_ms": 0.006457,
+      "legacy_ms": 0.016978,
+      "direct_ms": 0.006779,
+      "legacy_over_direct": 2.5044,
+      "contiguous_over_direct": 0.9525,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "direct CV > 10%",
+      "cv_percent": {
+        "legacy": 12.994,
+        "contiguous": 11.88,
+        "direct": 11.636,
+        "gather_k": 9.457,
+        "gather_v": 22.013
+      }
+    },
+    {
+      "visible_tokens": 15,
+      "block_size": 16,
+      "table_len": 1,
+      "gather_k_ms": 0.004893,
+      "gather_v_ms": 0.004947,
+      "contiguous_ms": 0.007797,
+      "legacy_ms": 0.017513,
+      "direct_ms": 0.008035,
+      "legacy_over_direct": 2.1796,
+      "contiguous_over_direct": 0.9704,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "contiguous CV > 10%",
+      "cv_percent": {
+        "legacy": 7.312,
+        "contiguous": 11.694,
+        "direct": 8.289,
+        "gather_k": 13.603,
+        "gather_v": 9.076
+      }
+    },
+    {
+      "visible_tokens": 16,
+      "block_size": 16,
+      "table_len": 1,
+      "gather_k_ms": 0.004843,
+      "gather_v_ms": 0.004848,
+      "contiguous_ms": 0.00723,
+      "legacy_ms": 0.017061,
+      "direct_ms": 0.008002,
+      "legacy_over_direct": 2.132,
+      "contiguous_over_direct": 0.9035,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "direct CV > 10%",
+      "cv_percent": {
+        "legacy": 11.182,
+        "contiguous": 10.428,
+        "direct": 13.292,
+        "gather_k": 19.524,
+        "gather_v": 17.073
+      }
+    },
+    {
+      "visible_tokens": 17,
+      "block_size": 16,
+      "table_len": 2,
+      "gather_k_ms": 0.004849,
+      "gather_v_ms": 0.004799,
+      "contiguous_ms": 0.007865,
+      "legacy_ms": 0.017664,
+      "direct_ms": 0.007882,
+      "legacy_over_direct": 2.2411,
+      "contiguous_over_direct": 0.9978,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "direct CV > 10%",
+      "cv_percent": {
+        "legacy": 8.102,
+        "contiguous": 11.626,
+        "direct": 12.213,
+        "gather_k": 20.329,
+        "gather_v": 13.122
+      }
+    },
+    {
+      "visible_tokens": 31,
+      "block_size": 16,
+      "table_len": 2,
+      "gather_k_ms": 0.004858,
+      "gather_v_ms": 0.005094,
+      "contiguous_ms": 0.008133,
+      "legacy_ms": 0.018739,
+      "direct_ms": 0.008429,
+      "legacy_over_direct": 2.2232,
+      "contiguous_over_direct": 0.9649,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "contiguous CV > 10%",
+      "cv_percent": {
+        "legacy": 9.866,
+        "contiguous": 10.222,
+        "direct": 8.546,
+        "gather_k": 15.365,
+        "gather_v": 20.462
+      }
+    },
+    {
+      "visible_tokens": 32,
+      "block_size": 16,
+      "table_len": 2,
+      "gather_k_ms": 0.004828,
+      "gather_v_ms": 0.005174,
+      "contiguous_ms": 0.008298,
+      "legacy_ms": 0.018052,
+      "direct_ms": 0.008098,
+      "legacy_over_direct": 2.2292,
+      "contiguous_over_direct": 1.0248,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "direct CV > 10%",
+      "cv_percent": {
+        "legacy": 7.851,
+        "contiguous": 15.587,
+        "direct": 17.242,
+        "gather_k": 17.731,
+        "gather_v": 18.362
+      }
+    },
+    {
+      "visible_tokens": 33,
+      "block_size": 16,
+      "table_len": 3,
+      "gather_k_ms": 0.004946,
+      "gather_v_ms": 0.004956,
+      "contiguous_ms": 0.008167,
+      "legacy_ms": 0.017871,
+      "direct_ms": 0.008264,
+      "legacy_over_direct": 2.1625,
+      "contiguous_over_direct": 0.9882,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "contiguous CV > 10%",
+      "cv_percent": {
+        "legacy": 9.417,
+        "contiguous": 15.558,
+        "direct": 9.253,
+        "gather_k": 17.323,
+        "gather_v": 18.256
+      }
+    },
+    {
+      "visible_tokens": 63,
+      "block_size": 16,
+      "table_len": 4,
+      "gather_k_ms": 0.004928,
+      "gather_v_ms": 0.004884,
+      "contiguous_ms": 0.008569,
+      "legacy_ms": 0.020396,
+      "direct_ms": 0.009464,
+      "legacy_over_direct": 2.1553,
+      "contiguous_over_direct": 0.9055,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "direct CV > 10%",
+      "cv_percent": {
+        "legacy": 7.812,
+        "contiguous": 11.669,
+        "direct": 10.835,
+        "gather_k": 17.027,
+        "gather_v": 16.12
+      }
+    },
+    {
+      "visible_tokens": 64,
+      "block_size": 16,
+      "table_len": 4,
+      "gather_k_ms": 0.004781,
+      "gather_v_ms": 0.004855,
+      "contiguous_ms": 0.008681,
+      "legacy_ms": 0.021077,
+      "direct_ms": 0.009128,
+      "legacy_over_direct": 2.309,
+      "contiguous_over_direct": 0.951,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 7.43,
+        "contiguous": 8.695,
+        "direct": 7.222,
+        "gather_k": 17.834,
+        "gather_v": 8.181
+      }
+    },
+    {
+      "visible_tokens": 65,
+      "block_size": 16,
+      "table_len": 5,
+      "gather_k_ms": 0.004953,
+      "gather_v_ms": 0.004979,
+      "contiguous_ms": 0.008411,
+      "legacy_ms": 0.020438,
+      "direct_ms": 0.01036,
+      "legacy_over_direct": 1.9729,
+      "contiguous_over_direct": 0.8119,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "contiguous CV > 10%",
+      "cv_percent": {
+        "legacy": 9.271,
+        "contiguous": 11.327,
+        "direct": 7.542,
+        "gather_k": 11.34,
+        "gather_v": 16.68
+      }
+    },
+    {
+      "visible_tokens": 127,
+      "block_size": 16,
+      "table_len": 8,
+      "gather_k_ms": 0.004875,
+      "gather_v_ms": 0.004957,
+      "contiguous_ms": 0.013185,
+      "legacy_ms": 0.018986,
+      "direct_ms": 0.014452,
+      "legacy_over_direct": 1.3137,
+      "contiguous_over_direct": 0.9123,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 6.584,
+        "contiguous": 5.869,
+        "direct": 4.869,
+        "gather_k": 15.34,
+        "gather_v": 12.489
+      }
+    },
+    {
+      "visible_tokens": 128,
+      "block_size": 16,
+      "table_len": 8,
+      "gather_k_ms": 0.004889,
+      "gather_v_ms": 0.004957,
+      "contiguous_ms": 0.01266,
+      "legacy_ms": 0.01891,
+      "direct_ms": 0.014373,
+      "legacy_over_direct": 1.3157,
+      "contiguous_over_direct": 0.8808,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 8.52,
+        "contiguous": 8.304,
+        "direct": 5.208,
+        "gather_k": 12.899,
+        "gather_v": 19.805
+      }
+    },
+    {
+      "visible_tokens": 129,
+      "block_size": 16,
+      "table_len": 9,
+      "gather_k_ms": 0.004892,
+      "gather_v_ms": 0.004885,
+      "contiguous_ms": 0.013688,
+      "legacy_ms": 0.018295,
+      "direct_ms": 0.015102,
+      "legacy_over_direct": 1.2115,
+      "contiguous_over_direct": 0.9064,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 9.408,
+        "contiguous": 5.241,
+        "direct": 5.419,
+        "gather_k": 8.243,
+        "gather_v": 13.806
+      }
+    },
+    {
+      "visible_tokens": 512,
+      "block_size": 16,
+      "table_len": 32,
+      "gather_k_ms": 0.005349,
+      "gather_v_ms": 0.005294,
+      "contiguous_ms": 0.036943,
+      "legacy_ms": 0.04362,
+      "direct_ms": 0.045032,
+      "legacy_over_direct": 0.9686,
+      "contiguous_over_direct": 0.8204,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": true,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 4.557,
+        "contiguous": 3.877,
+        "direct": 2.625,
+        "gather_k": 5.749,
+        "gather_v": 9.77
+      }
+    },
+    {
+      "visible_tokens": 1024,
+      "block_size": 16,
+      "table_len": 64,
+      "gather_k_ms": 0.006174,
+      "gather_v_ms": 0.006168,
+      "contiguous_ms": 0.073479,
+      "legacy_ms": 0.081692,
+      "direct_ms": 0.088113,
+      "legacy_over_direct": 0.9271,
+      "contiguous_over_direct": 0.8339,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 2.496,
+        "contiguous": 2.492,
+        "direct": 2.655,
+        "gather_k": 6.848,
+        "gather_v": 14.782
+      }
+    },
+    {
+      "visible_tokens": 2048,
+      "block_size": 16,
+      "table_len": 128,
+      "gather_k_ms": 0.006242,
+      "gather_v_ms": 0.006276,
+      "contiguous_ms": 0.143398,
+      "legacy_ms": 0.151036,
+      "direct_ms": 0.173375,
+      "legacy_over_direct": 0.8712,
+      "contiguous_over_direct": 0.8271,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 1.445,
+        "contiguous": 1.557,
+        "direct": 1.227,
+        "gather_k": 18.075,
+        "gather_v": 14.512
+      }
+    },
+    {
+      "visible_tokens": 8,
+      "block_size": 32,
+      "table_len": 1,
+      "gather_k_ms": 0.004682,
+      "gather_v_ms": 0.004727,
+      "contiguous_ms": 0.006332,
+      "legacy_ms": 0.015776,
+      "direct_ms": 0.006601,
+      "legacy_over_direct": 2.3899,
+      "contiguous_over_direct": 0.9591,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "direct CV > 10%",
+      "cv_percent": {
+        "legacy": 6.642,
+        "contiguous": 10.966,
+        "direct": 14.415,
+        "gather_k": 13.853,
+        "gather_v": 16.987
+      }
+    },
+    {
+      "visible_tokens": 31,
+      "block_size": 32,
+      "table_len": 1,
+      "gather_k_ms": 0.004803,
+      "gather_v_ms": 0.004868,
+      "contiguous_ms": 0.008096,
+      "legacy_ms": 0.017849,
+      "direct_ms": 0.008383,
+      "legacy_over_direct": 2.1293,
+      "contiguous_over_direct": 0.9658,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "contiguous CV > 10%",
+      "cv_percent": {
+        "legacy": 9.23,
+        "contiguous": 10.877,
+        "direct": 5.449,
+        "gather_k": 15.344,
+        "gather_v": 14.883
+      }
+    },
+    {
+      "visible_tokens": 32,
+      "block_size": 32,
+      "table_len": 1,
+      "gather_k_ms": 0.005007,
+      "gather_v_ms": 0.004818,
+      "contiguous_ms": 0.008055,
+      "legacy_ms": 0.017672,
+      "direct_ms": 0.008166,
+      "legacy_over_direct": 2.164,
+      "contiguous_over_direct": 0.9864,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "contiguous CV > 10%",
+      "cv_percent": {
+        "legacy": 7.436,
+        "contiguous": 10.009,
+        "direct": 8.031,
+        "gather_k": 12.22,
+        "gather_v": 15.941
+      }
+    },
+    {
+      "visible_tokens": 33,
+      "block_size": 32,
+      "table_len": 2,
+      "gather_k_ms": 0.004928,
+      "gather_v_ms": 0.004936,
+      "contiguous_ms": 0.008095,
+      "legacy_ms": 0.01784,
+      "direct_ms": 0.008365,
+      "legacy_over_direct": 2.1327,
+      "contiguous_over_direct": 0.9677,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "contiguous CV > 10%",
+      "cv_percent": {
+        "legacy": 8.885,
+        "contiguous": 10.669,
+        "direct": 8.128,
+        "gather_k": 10.427,
+        "gather_v": 21.134
+      }
+    },
+    {
+      "visible_tokens": 63,
+      "block_size": 32,
+      "table_len": 2,
+      "gather_k_ms": 0.004838,
+      "gather_v_ms": 0.004829,
+      "contiguous_ms": 0.008361,
+      "legacy_ms": 0.020697,
+      "direct_ms": 0.009583,
+      "legacy_over_direct": 2.1598,
+      "contiguous_over_direct": 0.8725,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "contiguous CV > 10%",
+      "cv_percent": {
+        "legacy": 8.516,
+        "contiguous": 10.657,
+        "direct": 5.019,
+        "gather_k": 17.267,
+        "gather_v": 15.657
+      }
+    },
+    {
+      "visible_tokens": 64,
+      "block_size": 32,
+      "table_len": 2,
+      "gather_k_ms": 0.004808,
+      "gather_v_ms": 0.004967,
+      "contiguous_ms": 0.008356,
+      "legacy_ms": 0.020413,
+      "direct_ms": 0.008983,
+      "legacy_over_direct": 2.2723,
+      "contiguous_over_direct": 0.9302,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 8.327,
+        "contiguous": 7.694,
+        "direct": 6.057,
+        "gather_k": 10.468,
+        "gather_v": 19.162
+      }
+    },
+    {
+      "visible_tokens": 65,
+      "block_size": 32,
+      "table_len": 3,
+      "gather_k_ms": 0.004859,
+      "gather_v_ms": 0.004784,
+      "contiguous_ms": 0.008438,
+      "legacy_ms": 0.020302,
+      "direct_ms": 0.010046,
+      "legacy_over_direct": 2.021,
+      "contiguous_over_direct": 0.84,
+      "equiv_bitwise": true,
+      "converged": false,
+      "gathers_converged": false,
+      "not_converged_reason": "contiguous CV > 10%",
+      "cv_percent": {
+        "legacy": 7.18,
+        "contiguous": 11.776,
+        "direct": 5.787,
+        "gather_k": 7.992,
+        "gather_v": 13.354
+      }
+    },
+    {
+      "visible_tokens": 127,
+      "block_size": 32,
+      "table_len": 4,
+      "gather_k_ms": 0.004949,
+      "gather_v_ms": 0.004902,
+      "contiguous_ms": 0.012621,
+      "legacy_ms": 0.018526,
+      "direct_ms": 0.014402,
+      "legacy_over_direct": 1.2864,
+      "contiguous_over_direct": 0.8763,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 8.702,
+        "contiguous": 7.389,
+        "direct": 6.17,
+        "gather_k": 12.165,
+        "gather_v": 29.195
+      }
+    },
+    {
+      "visible_tokens": 128,
+      "block_size": 32,
+      "table_len": 4,
+      "gather_k_ms": 0.004835,
+      "gather_v_ms": 0.004902,
+      "contiguous_ms": 0.012481,
+      "legacy_ms": 0.018896,
+      "direct_ms": 0.014255,
+      "legacy_over_direct": 1.3256,
+      "contiguous_over_direct": 0.8755,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 8.737,
+        "contiguous": 6.092,
+        "direct": 4.578,
+        "gather_k": 11.07,
+        "gather_v": 22.235
+      }
+    },
+    {
+      "visible_tokens": 129,
+      "block_size": 32,
+      "table_len": 5,
+      "gather_k_ms": 0.0049,
+      "gather_v_ms": 0.004961,
+      "contiguous_ms": 0.013521,
+      "legacy_ms": 0.018282,
+      "direct_ms": 0.014587,
+      "legacy_over_direct": 1.2534,
+      "contiguous_over_direct": 0.9269,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 9.061,
+        "contiguous": 7.949,
+        "direct": 3.051,
+        "gather_k": 7.742,
+        "gather_v": 11.335
+      }
+    },
+    {
+      "visible_tokens": 255,
+      "block_size": 32,
+      "table_len": 8,
+      "gather_k_ms": 0.004946,
+      "gather_v_ms": 0.005104,
+      "contiguous_ms": 0.020669,
+      "legacy_ms": 0.025412,
+      "direct_ms": 0.024491,
+      "legacy_over_direct": 1.0376,
+      "contiguous_over_direct": 0.844,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 5.026,
+        "contiguous": 5.558,
+        "direct": 4.436,
+        "gather_k": 12.117,
+        "gather_v": 9.604
+      }
+    },
+    {
+      "visible_tokens": 256,
+      "block_size": 32,
+      "table_len": 8,
+      "gather_k_ms": 0.005084,
+      "gather_v_ms": 0.005083,
+      "contiguous_ms": 0.020655,
+      "legacy_ms": 0.025011,
+      "direct_ms": 0.024536,
+      "legacy_over_direct": 1.0194,
+      "contiguous_over_direct": 0.8418,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 5.709,
+        "contiguous": 4.716,
+        "direct": 4.518,
+        "gather_k": 5.325,
+        "gather_v": 11.324
+      }
+    },
+    {
+      "visible_tokens": 257,
+      "block_size": 32,
+      "table_len": 9,
+      "gather_k_ms": 0.005166,
+      "gather_v_ms": 0.004991,
+      "contiguous_ms": 0.022434,
+      "legacy_ms": 0.027046,
+      "direct_ms": 0.024933,
+      "legacy_over_direct": 1.0847,
+      "contiguous_over_direct": 0.8998,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 4.431,
+        "contiguous": 4.86,
+        "direct": 4.44,
+        "gather_k": 27.644,
+        "gather_v": 12.905
+      }
+    },
+    {
+      "visible_tokens": 512,
+      "block_size": 32,
+      "table_len": 16,
+      "gather_k_ms": 0.005231,
+      "gather_v_ms": 0.005224,
+      "contiguous_ms": 0.036955,
+      "legacy_ms": 0.044634,
+      "direct_ms": 0.045025,
+      "legacy_over_direct": 0.9913,
+      "contiguous_over_direct": 0.8208,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 5.672,
+        "contiguous": 4.064,
+        "direct": 3.733,
+        "gather_k": 22.952,
+        "gather_v": 21.313
+      }
+    },
+    {
+      "visible_tokens": 1024,
+      "block_size": 32,
+      "table_len": 32,
+      "gather_k_ms": 0.006251,
+      "gather_v_ms": 0.006416,
+      "contiguous_ms": 0.07376,
+      "legacy_ms": 0.082835,
+      "direct_ms": 0.088924,
+      "legacy_over_direct": 0.9315,
+      "contiguous_over_direct": 0.8295,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 3.918,
+        "contiguous": 4.355,
+        "direct": 3.537,
+        "gather_k": 24.984,
+        "gather_v": 17.386
+      }
+    },
+    {
+      "visible_tokens": 2048,
+      "block_size": 32,
+      "table_len": 64,
+      "gather_k_ms": 0.006365,
+      "gather_v_ms": 0.006518,
+      "contiguous_ms": 0.143303,
+      "legacy_ms": 0.151247,
+      "direct_ms": 0.173212,
+      "legacy_over_direct": 0.8732,
+      "contiguous_over_direct": 0.8273,
+      "equiv_bitwise": true,
+      "converged": true,
+      "gathers_converged": false,
+      "not_converged_reason": "",
+      "cv_percent": {
+        "legacy": 1.617,
+        "contiguous": 1.64,
+        "direct": 1.315,
+        "gather_k": 18.943,
+        "gather_v": 16.034
+      }
+    }
+  ],
+  "profiler": {
+    "tool": "ncu 2026.2.1.0",
+    "shape": {
+      "visible_tokens": 2048,
+      "block_size": 16
+    },
+    "kernels": {
+      "attention_decode_paged_kernel": {
+        "gpu__time_duration_sum_us": 316.0,
+        "dram_bytes_sum_mb": 1.16,
+        "lts_t_bytes_sum_mb": 7.88,
+        "l1tex_t_bytes_sum_mb": 62.42,
+        "sm_throughput_pct": 0.86,
+        "long_scoreboard_stall_pct": 40.17
+      },
+      "attention_decode_kernel": {
+        "gpu__time_duration_sum_us": 279.94,
+        "sm_throughput_pct": 0.72,
+        "long_scoreboard_stall_pct": 45.87
+      },
+      "paged_gather_blocks_kernel": {
+        "gpu__time_duration_sum_us": 4.42,
+        "sm_throughput_pct": 26.6,
+        "long_scoreboard_stall_pct": 66.71
+      }
+    }
+  }
+}

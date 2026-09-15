@@ -85,6 +85,135 @@ __device__ __forceinline__ float block_reduce_sum_dyn(float val, float *red, int
     return val;
 }
 
+// ── Decode tile loop 的取址策略（TLLM-P0-004）──────────────────────────────
+//
+// decode 的 online softmax 与 K/V 的存放方式无关，只差"逻辑位置 → 行指针"这一步。
+// 把它抽成策略类型后，连续 KV 与分页 KV 共用**同一份**归约循环：
+//   - 避免在线 softmax 出现两份实现而数值漂移；
+//   - 使 direct 与 legacy 的差分退化为纯寻址测试。
+//
+// 共享 vs 复制的取舍见 issue #8 与设计包 §10.1：抽取会给 attention_decode 带来已测量
+// 的 +1.4~2.3% kernel 回归；但复制方案唯一的风险（两份实现漂移）已由
+// tests/test_paged_direct.cpp 的"逐位相同"门禁自动覆盖，故选择共享。
+//
+// 关键设计：**无效行返回零行，而不是 nullptr**。共享循环里因此没有任何有效性分支，
+// 累加表达式与抽取前逐字相同；且语义与既有 paged_gather_blocks 的"非法块 id 写 0"
+// 完全一致（零 K 行点积为 0 → score = 0；零 V 行贡献为 0），所以 direct 与 legacy 的
+// 逐元素相等是**构造性**成立的，而不是靠容差。
+//
+// 策略契约：
+//   static constexpr bool kNeedsTilePrep
+//       true  → begin_tile 会协作填充行缓存，共享循环随后插入一次 __syncthreads()
+//               （编译期决定，连续路径不会多出屏障）；
+//       false → begin_tile 为空操作。
+//   void begin_tile(int tile_start, int tile_size, int tid, int nthreads)
+//   const half *k_row(int pos)   // 逻辑位置 → K 行首；无效行返回零行（非空）
+//   const half *v_row(int pos)   // 逻辑位置 → V 行首；无效行返回零行（非空）
+namespace {
+
+// 连续 KV：K/V 为 [T, Hkv, D]，按 token 步长线性寻址。行永远有效。
+struct ContiguousRows {
+    static constexpr bool kNeedsTilePrep = false;
+
+    const half *k;
+    const half *v;
+    int         stride;
+
+    __device__ __forceinline__ void        begin_tile(int, int, int, int) {}
+    __device__ __forceinline__ const half *k_row(int pos) { return k + pos * stride; }
+    __device__ __forceinline__ const half *v_row(int pos) { return v + pos * stride; }
+};
+
+// 共享的 decode online-softmax 循环。累加顺序、__expf 与 final normalize 与抽取前
+// 逐字相同。
+//
+// TLLM-ATTN-SPLITKV：新增 [begin, end) 段范围与编译期 kFinalize 开关。
+//   kFinalize = true  → 归一化后写 output。begin = 0 / end = visible_len 时与抽取前**逐字相同**；
+//   kFinalize = false → 不归一化，写 split-KV 的局部三元组 (m, l, acc) 到 partial_*。
+// 段范围落在**逻辑 token** 上，因此 ContiguousRows / PagedRows 的取址（含冻结的地址公式与
+// 非法块 id 的零行语义）完全不需要改动。
+template <typename Rows, bool kFinalize>
+__device__ __forceinline__ void
+decode_online_softmax_range(const half *q_smem, half *output, float *scores, float *red,
+                            float *out_acc, Rows rows, int begin, int end, int head_dim,
+                            float scale, int tid, int nthreads, float *partial_m, float *partial_l,
+                            float *partial_acc) {
+    float running_max = -FLT_MAX;
+    float running_sum = 0.0f;
+
+    // 空段（begin >= end，例如 visible < num_splits 时的高位 split）不进入循环，
+    // running_max 保持 -FLT_MAX、running_sum 与 out_acc 保持 0 —— 这正是 combine 需要的
+    // 中性三元组。combine 侧 m == M 的特例见下，全空时不会出现 NaN。
+    for (int tile_start = begin; tile_start < end; tile_start += ATTEND_TILE) {
+        const int tile_size = min(ATTEND_TILE, end - tile_start);
+        rows.begin_tile(tile_start, tile_size, tid, nthreads);
+        if (Rows::kNeedsTilePrep) __syncthreads();
+
+        // Step 1: scores s_i = scale * (Q dot K_i) for this tile.
+        for (int i = tid; i < tile_size; i += nthreads) {
+            const half *k_pos = rows.k_row(tile_start + i);
+            float       score = 0.0f;
+            for (int d = 0; d < head_dim; ++d) {
+                score += __half2float(q_smem[d]) * __half2float(k_pos[d]);
+            }
+            scores[i] = score * scale;
+        }
+        __syncthreads();
+
+        // Step 2: tile max.
+        float m_tile = -FLT_MAX;
+        for (int i = tid; i < tile_size; i += nthreads) {
+            m_tile = fmaxf(m_tile, scores[i]);
+        }
+        m_tile = block_reduce_max_dyn(m_tile, red, nthreads);
+
+        // Step 3: online rescale.
+        const float m_new = fmaxf(running_max, m_tile);
+        const float old_rescale = __expf(running_max - m_new);
+
+        float sum_tile = 0.0f;
+        for (int i = tid; i < tile_size; i += nthreads) {
+            sum_tile += __expf(scores[i] - m_new);
+        }
+        sum_tile = block_reduce_sum_dyn(sum_tile, red, nthreads);
+
+        running_sum = running_sum * old_rescale + sum_tile;
+
+        // Step 4: update partial output.  Each thread owns a subset of head_dim
+        // dimensions and scans all positions in the tile.
+        for (int d = tid; d < head_dim; d += nthreads) {
+            float partial = 0.0f;
+            for (int i = 0; i < tile_size; ++i) {
+                const half *v_pos = rows.v_row(tile_start + i);
+                partial += __expf(scores[i] - m_new) * __half2float(v_pos[d]);
+            }
+            out_acc[d] = out_acc[d] * old_rescale + partial;
+        }
+
+        running_max = m_new;
+        __syncthreads();
+    }
+
+    if constexpr (kFinalize) {
+        // Final normalize.
+        const float inv_sum = 1.0f / (running_sum + 1e-9f);
+        for (int d = tid; d < head_dim; d += nthreads) {
+            output[d] = __float2half(out_acc[d] * inv_sum);
+        }
+    } else {
+        // split-KV：写局部三元组。m 与 l 是块内归约结果（对所有线程一致），换一个线程写。
+        if (tid == 0) {
+            partial_m[0] = running_max;
+            partial_l[0] = running_sum;
+        }
+        for (int d = tid; d < head_dim; d += nthreads) {
+            partial_acc[d] = out_acc[d];
+        }
+    }
+}
+
+} // namespace
+
 // Decode attention: single query token against cached K/V.
 // Q: [1, Hq, D].  One block per q_head.
 // visible_len is read from global memory so the kernel is CUDA-Graph
@@ -122,63 +251,10 @@ __global__ void attention_decode_kernel(const half *__restrict__ query,
     }
     __syncthreads();
 
-    float running_max = -FLT_MAX;
-    float running_sum = 0.0f;
-
-    for (int tile_start = 0; tile_start < visible_len; tile_start += ATTEND_TILE) {
-        const int tile_size = min(ATTEND_TILE, visible_len - tile_start);
-
-        // Step 1: scores s_i = scale * (Q dot K_i) for this tile.
-        for (int i = tid; i < tile_size; i += nthreads) {
-            const int   pos = tile_start + i;
-            const half *k_pos = k + pos * kv_stride;
-            float       score = 0.0f;
-            for (int d = 0; d < head_dim; ++d) {
-                score += __half2float(q_smem[d]) * __half2float(k_pos[d]);
-            }
-            scores[i] = score * scale;
-        }
-        __syncthreads();
-
-        // Step 2: tile max.
-        float m_tile = -FLT_MAX;
-        for (int i = tid; i < tile_size; i += nthreads) {
-            m_tile = fmaxf(m_tile, scores[i]);
-        }
-        m_tile = block_reduce_max_dyn(m_tile, red, nthreads);
-
-        // Step 3: online rescale.
-        const float m_new = fmaxf(running_max, m_tile);
-        const float old_rescale = __expf(running_max - m_new);
-
-        float sum_tile = 0.0f;
-        for (int i = tid; i < tile_size; i += nthreads) {
-            sum_tile += __expf(scores[i] - m_new);
-        }
-        sum_tile = block_reduce_sum_dyn(sum_tile, red, nthreads);
-
-        running_sum = running_sum * old_rescale + sum_tile;
-
-        // Step 4: update partial output.  Each thread owns a subset of head_dim
-        // dimensions and scans all positions in the tile.
-        for (int d = tid; d < head_dim; d += nthreads) {
-            float partial = 0.0f;
-            for (int i = 0; i < tile_size; ++i) {
-                const int pos = tile_start + i;
-                partial += __expf(scores[i] - m_new) * __half2float(v[pos * kv_stride + d]);
-            }
-            out_acc[d] = out_acc[d] * old_rescale + partial;
-        }
-
-        running_max = m_new;
-        __syncthreads();
-    }
-
-    // Final normalize.
-    const float inv_sum = 1.0f / (running_sum + 1e-9f);
-    for (int d = tid; d < head_dim; d += nthreads) {
-        o[d] = __float2half(out_acc[d] * inv_sum);
-    }
+    ContiguousRows rows{k, v, kv_stride};
+    decode_online_softmax_range<ContiguousRows, true>(q_smem, o, scores, red, out_acc, rows, 0,
+                                                      visible_len, head_dim, scale, tid, nthreads,
+                                                      nullptr, nullptr, nullptr);
 }
 
 void attention_decode(const half *query, const half *k_cache, const half *v_cache, half *output,
@@ -211,6 +287,377 @@ void attention_decode(const half *query, const half *k_cache, const half *v_cach
     device_len.copyFromHost(&visible_len, 1, stream);
     attention_decode(query, k_cache, v_cache, output, scale, num_q_heads, num_kv_heads,
                      device_len.data(), head_dim, stream);
+}
+
+// ============================================================================
+// Direct paged decode attention（TLLM-P0-004）
+//
+// 与 attention_decode_kernel 的唯一区别是 K/V 取址：直接从物理 pool + block table
+// 寻址，不再把可见窗口 gather 成连续 scratch。归约循环与连续版**共用**同一份
+// decode_online_softmax（取舍见 issue #8 与设计包 §10.1）。
+//
+// 无效行（越界块 id、b >= table_len）返回共享内存里的零行，因此循环内无分支，且语义
+// 与 paged_gather_blocks 写 0 完全一致。
+// ============================================================================
+
+// 分页 KV 取址策略。每 tile 一次性把 tile 内所有逻辑位置映射到 pool 行内元素偏移，
+// 避免在 step 4 的 (head_dim × tile_size) 内层循环里反复做整数除法与块表读取。
+struct PagedRows {
+    static constexpr bool kNeedsTilePrep = true;
+
+    const half *k_base;
+    const half *v_base;
+    const half *zero_row; // 共享内存零行，长度 >= head_dim
+    const int  *block_table;
+    int         block_size;
+    int         max_num_blocks;
+    int         table_len;
+    int         kv_dim;
+    int        *row_elem; // 共享内存 [ATTEND_TILE]：行内元素偏移；-1 = 无效
+    int         tile_start;
+
+    __device__ __forceinline__ void begin_tile(int start, int tile_size, int tid, int nthreads) {
+        tile_start = start;
+        for (int i = tid; i < tile_size; i += nthreads) {
+            const int pos = start + i;
+            const int b = pos / block_size;
+            const int r = pos - b * block_size;
+            const int p = (b < table_len) ? block_table[b] : -1;
+            row_elem[i] =
+                (p < 0 || p >= max_num_blocks)
+                    ? -1
+                    : static_cast<int>(
+                          (static_cast<size_t>(p) * block_size + static_cast<size_t>(r)) * kv_dim);
+        }
+    }
+
+    __device__ __forceinline__ const half *k_row(int pos) {
+        const int e = row_elem[pos - tile_start];
+        return (e < 0) ? zero_row : k_base + e;
+    }
+    __device__ __forceinline__ const half *v_row(int pos) {
+        const int e = row_elem[pos - tile_start];
+        return (e < 0) ? zero_row : v_base + e;
+    }
+};
+
+__global__ void attention_decode_paged_kernel(
+    const half *__restrict__ query, const half *__restrict__ k_pool_layer,
+    const half *__restrict__ v_pool_layer, const int *__restrict__ block_table,
+    half *__restrict__ output, float scale, int num_q_heads, int num_kv_heads, int head_dim,
+    const int *device_visible_tokens, int block_size, int max_num_blocks, int table_len) {
+    const int visible_tokens = *device_visible_tokens;
+    const int q_head = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+
+    const int group_size = num_q_heads / num_kv_heads;
+    const int kv_head = q_head / group_size;
+    const int kv_dim = num_kv_heads * head_dim;
+
+    // 本 head 在 pool 内的基址（layer 偏移已由 caller 加在指针上）
+    const half *k_base = k_pool_layer + kv_head * head_dim;
+    const half *v_base = v_pool_layer + kv_head * head_dim;
+    half       *o = output + q_head * head_dim;
+
+    extern __shared__ float smem[];
+    AttentionSmemLayout     layout{head_dim};
+    float                  *scores = smem + layout.scores_offset();
+    float                  *red = smem + layout.red_offset();
+    float                  *out_acc = smem + layout.out_acc_offset();
+    half                   *q_smem =
+        reinterpret_cast<half *>(reinterpret_cast<char *>(smem) + layout.q_offset_bytes());
+
+    // paged 专用共享内存（layout 之后）：
+    //   row_elem[ATTEND_TILE]  本 tile 每个逻辑 token 的行内元素偏移；-1 表示无效
+    //   zero_row[head_dim]     无效行使用的零行
+    char *tail = reinterpret_cast<char *>(smem) + layout.total_bytes();
+    int  *row_elem = reinterpret_cast<int *>(tail);
+    half *zero_row = reinterpret_cast<half *>(tail + ATTEND_TILE * sizeof(int));
+
+    // Cache Q / zero the accumulator / 初始化零行
+    for (int d = tid; d < head_dim; d += nthreads) {
+        q_smem[d] = query[q_head * head_dim + d];
+        out_acc[d] = 0.0f;
+        zero_row[d] = __float2half(0.0f);
+    }
+    __syncthreads();
+
+    PagedRows rows;
+    rows.k_base = k_base;
+    rows.v_base = v_base;
+    rows.zero_row = zero_row;
+    rows.block_table = block_table;
+    rows.block_size = block_size;
+    rows.max_num_blocks = max_num_blocks;
+    rows.table_len = table_len;
+    rows.kv_dim = kv_dim;
+    rows.row_elem = row_elem;
+    rows.tile_start = 0;
+
+    decode_online_softmax_range<PagedRows, true>(q_smem, o, scores, red, out_acc, rows, 0,
+                                                 visible_tokens, head_dim, scale, tid, nthreads,
+                                                 nullptr, nullptr, nullptr);
+}
+
+void attention_decode_paged(const half *query, const half *k_pool_layer, const half *v_pool_layer,
+                            const int *block_table, half *output, float scale, int num_q_heads,
+                            int num_kv_heads, int head_dim, const int *device_visible_tokens,
+                            int block_size, int max_num_blocks, int table_len,
+                            cudaStream_t stream) {
+    // 防御性检查（与文件内其他 kernel 一致）；真正的错误契约在 host 侧
+    // TransformerLayer::forwardPaged，参数非法不应依赖这里的静默 no-op。
+    if (query == nullptr || k_pool_layer == nullptr || v_pool_layer == nullptr ||
+        block_table == nullptr || output == nullptr || device_visible_tokens == nullptr) {
+        return;
+    }
+    if (num_q_heads <= 0 || num_kv_heads <= 0 || head_dim <= 0 || block_size <= 0 ||
+        max_num_blocks <= 0) {
+        return;
+    }
+
+    const int           num_blocks = num_q_heads;
+    const int           threads = 128;
+    AttentionSmemLayout layout{head_dim};
+    const size_t        shared_size = layout.total_bytes() + ATTEND_TILE * sizeof(int) +
+                               static_cast<size_t>(head_dim) * sizeof(half);
+
+    attention_decode_paged_kernel<<<num_blocks, threads, shared_size, stream>>>(
+        query, k_pool_layer, v_pool_layer, block_table, output, scale, num_q_heads, num_kv_heads,
+        head_dim, device_visible_tokens, block_size, max_num_blocks, table_len);
+}
+
+// ============================================================================
+// Split-KV decode attention（TLLM-ATTN-SPLITKV）
+//
+// 动机（见 docs/architecture/decode-attention-splitkv-design.md §2）：单 query decode 的
+// 并行度只有 num_q_heads 一个轴，实测 achieved occupancy 8.33%（S=2048），且无任何资源
+// 饱和（DRAM 0.44%、SM 0.72%、L2 0.96%）—— 瓶颈是"没有足够的 warp 隐藏访存延迟"。
+// 因此把**可见 KV 逻辑窗口**切成 num_splits 段，每段一个 block 独立归约，再由一个小的
+// combine kernel 合并。
+//
+// 关键性质：
+//   - 段范围在 device 端由 *device_visible_* 派生，num_splits 是 host 参数 ⇒ grid 在捕获时
+//     固定、可见长度仍可随 replay 变化，**保持 CUDA Graph 可捕获**；
+//   - num_splits == 1 时 combine 退化为恒等，输出与单遍路径**逐位相同**（见 combine 注释）；
+//   - 归约循环不复制：两条路径继续共用 decode_online_softmax_range；
+//   - 段边界落在逻辑 token 上 ⇒ 地址公式与零行语义不需要改。
+// ============================================================================
+
+// 把 num_splits 个 (m_i, l_i, acc_i) 按 online-softmax 的合并式折成一个输出：
+//   M = max_i m_i;  L = Σ l_i·w_i;  ACC[d] = Σ acc_i[d]·w_i;  out = ACC / (L + 1e-9)
+//   w_i = exp(m_i - M)
+//
+// m_i == M 时把 w_i **显式取 1.0f**，而不是交给 __expf(0)：这样 num_splits == 1 时
+// L = l_0·1.0f = l_0、ACC = acc_0，与单遍路径的 1/(running_sum + 1e-9) 逐位一致，且不依赖
+// 快速 intrinsics 在 0 点的返回值。数学上 exp(0) 恒为 1，所以这也是更准的形式。
+//
+// 全空（visible == 0）时所有 m_i = -FLT_MAX ⇒ M = -FLT_MAX、全部 w_i = 1、L = Σ l_i = 0、
+// ACC = 0 ⇒ out = 0·(1/(0+1e-9)) = 0：与 test_paged_direct.cpp 冻结的「visible = 0 → 全 0」
+// 语义一致，且不产生 NaN。
+__global__ void attention_splitkv_combine_kernel(const float *__restrict__ partial,
+                                                 half *__restrict__ output, int head_dim,
+                                                 int num_splits) {
+    const int    q_head = blockIdx.x;
+    const int    tid = threadIdx.x;
+    const int    nthreads = blockDim.x;
+    const int    stride = 2 + head_dim;
+    const float *base = partial + static_cast<size_t>(q_head) * num_splits * stride;
+
+    float M = -FLT_MAX;
+    for (int s = 0; s < num_splits; ++s) {
+        M = fmaxf(M, base[static_cast<size_t>(s) * stride]);
+    }
+
+    float L = 0.0f;
+    for (int s = 0; s < num_splits; ++s) {
+        const float m = base[static_cast<size_t>(s) * stride];
+        const float w = (m == M) ? 1.0f : __expf(m - M);
+        L += base[static_cast<size_t>(s) * stride + 1] * w;
+    }
+
+    const float inv_sum = 1.0f / (L + 1e-9f);
+    half       *o = output + static_cast<size_t>(q_head) * head_dim;
+    for (int d = tid; d < head_dim; d += nthreads) {
+        float acc = 0.0f;
+        for (int s = 0; s < num_splits; ++s) {
+            const float m = base[static_cast<size_t>(s) * stride];
+            // L 的循环里已经判断过一次；这里为每个 d 重算，combine 的规模（Hq 个 block，
+            // num_splits 个槽）远小于 attention 本体，不值得引入共享内存广播的复杂度。
+            const float w = (m == M) ? 1.0f : __expf(m - M);
+            acc += base[static_cast<size_t>(s) * stride + 2 + d] * w;
+        }
+        o[d] = __float2half(acc * inv_sum);
+    }
+}
+
+// 连续 KV 的分段 partial：一个 block 负责 (q_head, split) 的一个逻辑区间。
+__global__ void
+attention_decode_splitkv_kernel(const half *__restrict__ query, const half *__restrict__ k_cache,
+                                const half *__restrict__ v_cache, half *__restrict__ output,
+                                float scale, int num_q_heads, int num_kv_heads,
+                                const int *__restrict__ device_visible_len, int head_dim,
+                                float *__restrict__ partial, int                num_splits) {
+    const int visible_len = *device_visible_len;
+    const int q_head = blockIdx.x;
+    const int split = blockIdx.y;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+
+    const int group_size = num_q_heads / num_kv_heads;
+    const int kv_head = q_head / group_size;
+    const int kv_stride = num_kv_heads * head_dim;
+
+    const half *k = k_cache + kv_head * head_dim;
+    const half *v = v_cache + kv_head * head_dim;
+    half       *o = output + q_head * head_dim;
+
+    extern __shared__ float smem[];
+    AttentionSmemLayout     layout{head_dim};
+    float                  *scores = smem + layout.scores_offset();
+    float                  *red = smem + layout.red_offset();
+    float                  *out_acc = smem + layout.out_acc_offset();
+    half                   *q_smem =
+        reinterpret_cast<half *>(reinterpret_cast<char *>(smem) + layout.q_offset_bytes());
+
+    for (int d = tid; d < head_dim; d += nthreads) {
+        q_smem[d] = query[q_head * head_dim + d];
+        out_acc[d] = 0.0f;
+    }
+    __syncthreads();
+
+    // 段范围：chunk 由**运行时**可见长度派生，故 grid 固定也能随 replay 变化。
+    const int chunk = (visible_len + num_splits - 1) / num_splits;
+    const int begin = split * chunk;
+    const int end = (begin + chunk < visible_len) ? (begin + chunk) : visible_len;
+
+    const int stride = 2 + head_dim;
+    float    *pb =
+        partial + (static_cast<size_t>(q_head) * num_splits + split) * static_cast<size_t>(stride);
+
+    ContiguousRows rows{k, v, kv_stride};
+    decode_online_softmax_range<ContiguousRows, false>(q_smem, o, scores, red, out_acc, rows, begin,
+                                                       end, head_dim, scale, tid, nthreads, pb,
+                                                       pb + 1, pb + 2);
+}
+
+// 分页 KV 的分段 partial：与上面同构，只换取址策略（池 + 块表）。
+__global__ void attention_decode_paged_splitkv_kernel(
+    const half *__restrict__ query, const half *__restrict__ k_pool_layer,
+    const half *__restrict__ v_pool_layer, const int *__restrict__ block_table,
+    half *__restrict__ output, float scale, int num_q_heads, int num_kv_heads, int head_dim,
+    const int *__restrict__ device_visible_tokens, int block_size, int max_num_blocks,
+    int table_len, float *__restrict__ partial, int num_splits) {
+    const int visible_tokens = *device_visible_tokens;
+    const int q_head = blockIdx.x;
+    const int split = blockIdx.y;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+
+    const int group_size = num_q_heads / num_kv_heads;
+    const int kv_head = q_head / group_size;
+    const int kv_dim = num_kv_heads * head_dim;
+
+    const half *k_base = k_pool_layer + kv_head * head_dim;
+    const half *v_base = v_pool_layer + kv_head * head_dim;
+    half       *o = output + q_head * head_dim;
+
+    extern __shared__ float smem[];
+    AttentionSmemLayout     layout{head_dim};
+    float                  *scores = smem + layout.scores_offset();
+    float                  *red = smem + layout.red_offset();
+    float                  *out_acc = smem + layout.out_acc_offset();
+    half                   *q_smem =
+        reinterpret_cast<half *>(reinterpret_cast<char *>(smem) + layout.q_offset_bytes());
+
+    char *tail = reinterpret_cast<char *>(smem) + layout.total_bytes();
+    int  *row_elem = reinterpret_cast<int *>(tail);
+    half *zero_row = reinterpret_cast<half *>(tail + ATTEND_TILE * sizeof(int));
+
+    for (int d = tid; d < head_dim; d += nthreads) {
+        q_smem[d] = query[q_head * head_dim + d];
+        out_acc[d] = 0.0f;
+        zero_row[d] = __float2half(0.0f);
+    }
+    __syncthreads();
+
+    PagedRows rows;
+    rows.k_base = k_base;
+    rows.v_base = v_base;
+    rows.zero_row = zero_row;
+    rows.block_table = block_table;
+    rows.block_size = block_size;
+    rows.max_num_blocks = max_num_blocks;
+    rows.table_len = table_len;
+    rows.kv_dim = kv_dim;
+    rows.row_elem = row_elem;
+    rows.tile_start = 0;
+
+    const int chunk = (visible_tokens + num_splits - 1) / num_splits;
+    const int begin = split * chunk;
+    const int end = (begin + chunk < visible_tokens) ? (begin + chunk) : visible_tokens;
+
+    const int stride = 2 + head_dim;
+    float    *pb =
+        partial + (static_cast<size_t>(q_head) * num_splits + split) * static_cast<size_t>(stride);
+
+    decode_online_softmax_range<PagedRows, false>(q_smem, o, scores, red, out_acc, rows, begin, end,
+                                                  head_dim, scale, tid, nthreads, pb, pb + 1,
+                                                  pb + 2);
+}
+
+void attention_decode_splitkv(const half *query, const half *k_cache, const half *v_cache,
+                              half *output, float scale, int num_q_heads, int num_kv_heads,
+                              const int *device_visible_len, int head_dim, float *partial_workspace,
+                              int num_splits, cudaStream_t stream) {
+    // 防御性检查与注意：num_splits 会作为 grid.y，受 65535 上界约束。
+    if (num_q_heads <= 0 || num_kv_heads <= 0 || head_dim <= 0 || device_visible_len == nullptr) {
+        return;
+    }
+    if (partial_workspace == nullptr || num_splits < 1 || num_splits > 65535) {
+        return;
+    }
+
+    AttentionSmemLayout layout{head_dim};
+    const size_t        shared_size = layout.total_bytes();
+    dim3                grid(static_cast<unsigned>(num_q_heads), static_cast<unsigned>(num_splits));
+
+    attention_decode_splitkv_kernel<<<grid, 128, shared_size, stream>>>(
+        query, k_cache, v_cache, output, scale, num_q_heads, num_kv_heads, device_visible_len,
+        head_dim, partial_workspace, num_splits);
+    attention_splitkv_combine_kernel<<<num_q_heads, 128, 0, stream>>>(partial_workspace, output,
+                                                                      head_dim, num_splits);
+}
+
+void attention_decode_paged_splitkv(const half *query, const half *k_pool_layer,
+                                    const half *v_pool_layer, const int *block_table, half *output,
+                                    float scale, int num_q_heads, int num_kv_heads, int head_dim,
+                                    const int *device_visible_tokens, int block_size,
+                                    int max_num_blocks, int table_len, float *partial_workspace,
+                                    int num_splits, cudaStream_t stream) {
+    if (query == nullptr || k_pool_layer == nullptr || v_pool_layer == nullptr ||
+        block_table == nullptr || output == nullptr || device_visible_tokens == nullptr) {
+        return;
+    }
+    if (num_q_heads <= 0 || num_kv_heads <= 0 || head_dim <= 0 || block_size <= 0 ||
+        max_num_blocks <= 0) {
+        return;
+    }
+    if (partial_workspace == nullptr || num_splits < 1 || num_splits > 65535) {
+        return;
+    }
+
+    AttentionSmemLayout layout{head_dim};
+    const size_t        shared_size = layout.total_bytes() + ATTEND_TILE * sizeof(int) +
+                               static_cast<size_t>(head_dim) * sizeof(half);
+    dim3 grid(static_cast<unsigned>(num_q_heads), static_cast<unsigned>(num_splits));
+
+    attention_decode_paged_splitkv_kernel<<<grid, 128, shared_size, stream>>>(
+        query, k_pool_layer, v_pool_layer, block_table, output, scale, num_q_heads, num_kv_heads,
+        head_dim, device_visible_tokens, block_size, max_num_blocks, table_len, partial_workspace,
+        num_splits);
+    attention_splitkv_combine_kernel<<<num_q_heads, 128, 0, stream>>>(partial_workspace, output,
+                                                                      head_dim, num_splits);
 }
 
 // Prefill attention: full sequence with causal masking.
