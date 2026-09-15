@@ -66,6 +66,7 @@ export default withMermaid(
               { text: 'KV 缓存设计', link: '/architecture/kv-cache' },
               { text: 'CUDA 内核', link: '/architecture/cuda-kernels' },
               { text: '内存模型', link: '/architecture/memory-model' },
+              { text: 'Direct Paged 设计（提案）', link: '/architecture/direct-paged-decode-attention-design' },
               { text: 'Split-KV Decode Attention（设计）', link: '/architecture/decode-attention-splitkv-design' },
             ],
           },
