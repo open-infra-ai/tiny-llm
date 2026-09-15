@@ -4,6 +4,27 @@ All notable tracked releases of Tiny-LLM are recorded here.
 
 ## [Unreleased]
 
+### Added
+
+- `tests/paged_attention_oracle.h`（TLLM-P0-002）：不依赖外部 GGUF 的
+  paged/contiguous synthetic correctness oracle。纯 host 参考实现，冻结 paged KV
+  地址公式、块表长度 contract 与 GQA 映射，并独立计算 fp32 decode attention；
+  **不调用** `paged_gather_blocks` / `paged_scatter_blocks` / `attention_decode`。
+- `tests/test_paged_oracle.cpp`：上述 oracle 的 kernel 级与 layer 级差分门禁。
+  kernel 级把生产 scatter + gather + attention_decode 对照独立参考；layer 级把
+  `TransformerLayer::forwardPaged` 的 pool 内容按冻结公式读回，与连续 KV cache
+  的可见 K/V 做逐层位级比较。
+
+### Fixed
+
+- `TransformerLayer::forwardPaged` 增加块表长度校验：`visible_blocks` 必须
+  `>= ceil(visible_tokens / block_size)`，否则返回错误。此前过短的块表会让
+  `paged_gather_blocks` 越界读 `block_table`（未定义行为）；该 contract 已由
+  `src/ffi.cpp` 的 `need_blocks` 检查使用，现下移到层入口。
+- `KVCacheManager::create` 显式把 `append_pos_` 清零（与 `memory_pool_` 的
+  `cudaMemset` 约定一致）。此前依赖 `cudaMalloc` 返回清零内存：调用方未先
+  `setAppendPos` 时，`appendKV` 会按未初始化值把 K/V 写到错误位置。
+
 ### Changed
 
 - C ABI 正常 greedy 路径（`logprobs_k == 0`）现在在每个序列 layer forward 完成后把
@@ -23,6 +44,13 @@ All notable tracked releases of Tiny-LLM are recorded here.
 
 ### Tests
 
+- TLLM-P0-002 oracle（8 项）：kernel 级与 layer 级 paged/contiguous 差分，覆盖
+  block_size 1/16/32、跨块尾部、MHA/GQA/MQA、head_dim 32/64/128、绝对位置增量
+  scatter、多 layer pool offset、非法块 id 与过短块表、随机 seed；oracle 已做变异
+  检验（破坏 scatter 位置写入或 layer 步长会分别被对应门禁捕获），
+  `compute-sanitizer --tool memcheck` 0 error。边界：被测路径仍是
+  scatter → gather → continuous attention，**不是** direct PagedAttention；
+  本变更不产生任何性能数字。
 - CUDA kernel 直接对照 CPU greedy（跨 block scan、同分 token、首项 NaN 与双行 batch）；
   batch final RMSNorm / LM head 对照逐行单 token 路径，转置 FP16 M=4 对照 reference。
   RoPE 每 token 位置数组以非连续、非单调位置逐元素对照 CPU half-split 参考。
