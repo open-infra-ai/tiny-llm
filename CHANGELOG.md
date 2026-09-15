@@ -42,6 +42,15 @@ All notable tracked releases of Tiny-LLM are recorded here.
 
 ### Fixed
 
+- `LayerWorkspace::allocate` 补齐 `attn_partial` 的分配（`num_heads *
+  kAttnMaxSplits * (2 + head_dim)` fp32，布局见 `transformer.h`）。此前 PR-C
+  接线时留下了 "EXPERIMENT: allocation disabled" 标记，生产路径上该指针恒为
+  `nullptr`；两个 splitkv kernel 入口对 `partial_workspace == nullptr` 的防御
+  检查会**静默返回**，注意力输出从未写入，`wo` 投影随后消费 `attn_buf` 中的
+  陈旧数据。经 C ABI 表现为 logit 漂移（实测 top-1 prob 0.051 vs 0.009）而非
+  崩溃，因此既有 layer 级门禁全部漏检：`SplitKvLegacyAndDirectAgreeBitwiseAtSameSplits`
+  比较的是两条同样空转的路径，单遍冒烟检查 5% 相对容差吸收了陈旧读差异。
+  由新增的 FFI 级差分门禁（`tests/test_ffi_paged_dispatch.cpp`）捕获。
 - `TransformerLayer::forwardPaged` 增加块表长度校验：`visible_blocks` 必须
   `>= ceil(visible_tokens / block_size)`，否则返回错误。此前过短的块表会让
   `paged_gather_blocks` 越界读 `block_table`（未定义行为）；该 contract 已由
@@ -77,6 +86,17 @@ All notable tracked releases of Tiny-LLM are recorded here.
 
 ### Tests
 
+- TLLM-P0-005 FFI 级差分门禁（4 项，`tests/test_ffi_paged_dispatch.cpp`）：把
+  direct paged attention 的验证推进到生产 C ABI——按 GGUF v3 规范在测试内构造
+  合成模型（F16 tensor、2 层 qwen2 小几何、确定性权重），走完整的
+  `tinyllm_load` → `allocate_sequence` → `step`（prefill+decode）→ `free_sequence`。
+  断言分级与 kernel/layer 门禁口径一致：`legacy`/`direct`/`auto`/`splitkv=1`
+  之间逐位等价（逐步 token id 严格相等）；`splitkv>1` 容忍 fp32 归约序差异，
+  改为逐步比较完整输出概率分布（|Δprob| ≤ 0.02）；decode 固定喂 token 使单步
+  argmax 翻转不会级联污染后续比较。另覆盖：策略 2（`max_num_blocks == 0`）
+  不受开关影响；块表不足返回 `TLLM_ERR` 且序列保持可用；非法
+  `TLLM_ATTN_SPLITKV` 取值干净失败且句柄可恢复。该门禁落地即捕获上方
+  `attn_partial` 未分配的生产缺陷。
 - TLLM-P0-004 dispatch（8 项，`tests/test_paged_dispatch.cpp`）：用"共享 scratch 是否被
   写入"直接观测路由结果——legacy 必须 gather（scratch 被覆写），direct 必须不碰
   scratch；覆盖默认值=legacy、`auto`/`direct`、大小写不敏感、非法取值显式失败、
