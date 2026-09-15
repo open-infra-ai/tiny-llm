@@ -399,15 +399,19 @@ TEST_F(FfiPagedDispatchTest, DirectAutoAndSplitKvMatchLegacyThroughCAbi) {
     splitkv.set("1");
     EXPECT_EQ(runPagedSeq(h.get(), 0).tokens, base_tok.tokens) << "splitkv=1 anchor";
 
-    // splitkv>1：逐步比较完整概率分布（容忍 fp32 归约序差异）
+    // splitkv>1：逐步比较完整概率分布（容忍 fp32 归约序差异）。
+    // 开关同时作用于 direct 与 legacy 两条入口——只测 direct 会让 legacy
+    // 侧的 partial 接线回归漏检（master 上正是两条入口同样空转）。
     paged.set("legacy");
     splitkv.unset();
     const SeqOut base_lp = runPagedSeq(h.get(), kVocab);
-    paged.set("direct");
-    for (const char *ns : {"2", "4", "16"}) {
-        splitkv.set(ns);
-        const SeqOut cur = runPagedSeq(h.get(), kVocab);
-        EXPECT_TRUE(probsNear(base_lp, cur, 0.02f)) << "splitkv=" << ns;
+    for (const char *mode : {"direct", "legacy"}) {
+        paged.set(mode);
+        for (const char *ns : {"2", "4", "16"}) {
+            splitkv.set(ns);
+            const SeqOut cur = runPagedSeq(h.get(), kVocab);
+            EXPECT_TRUE(probsNear(base_lp, cur, 0.02f)) << "mode=" << mode << " splitkv=" << ns;
+        }
     }
 }
 
