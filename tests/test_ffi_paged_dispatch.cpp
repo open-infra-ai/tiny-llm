@@ -22,6 +22,7 @@
 #include <cuda_fp16.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -244,9 +245,11 @@ class EnvGuard {
     bool        had_ = false;
 };
 
-// ── 固定输入：prefill 48 token（3 块）+ 8 步 decode（跨第 4 块）──
+// ── 固定输入：prefill 48 token（3 块）+ 20 步 decode ──
+// decode 第 17 步（visible 65）跨进第 5 块：块表在 decode 期间增长，
+// 正是生产路径的常态事件。
 constexpr int kPromptLen = 48;
-constexpr int kDecodeSteps = 8;
+constexpr int kDecodeSteps = 20;
 constexpr int kBlockSize = 16;
 constexpr int kMaxBlocks = 32;
 constexpr int kFeedToken = 7; // decode 步固定喂入（轨迹与 env 解耦）
@@ -265,7 +268,7 @@ std::vector<int> promptPositions() {
 }
 
 // 非连续物理块表：暴露"逻辑窗口 ≠ 物理布局"的取址差异
-const std::vector<int> kBlocks = {7, 2, 11, 5};
+const std::vector<int> kBlocks = {7, 2, 11, 5, 9};
 
 struct HandleDeleter {
     void operator()(TinyLlmHandle *h) const {
@@ -296,8 +299,9 @@ struct SeqOut {
     std::vector<int>                  steps_rc; // 每步返回值（诊断用）
 };
 
-// 跑一次完整序列：prefill 48 token（3 块），decode 固定喂 kFeedToken
-// （跨第 4 块）。lp_k>0 时每步取 top-k (id, logprob) 并转 prob map。
+// 跑一次完整序列：prefill 48 token（3 块），decode 固定喂 kFeedToken、
+// 块表随可见窗口增长（第 17 步跨进第 5 块）。lp_k>0 时每步取 top-k
+// (id, logprob) 并转 prob map。
 SeqOut runPagedSeq(TinyLlmHandle *h, int lp_k) {
     SeqOut             out;
     const auto         prompt = promptTokens();
@@ -329,9 +333,10 @@ SeqOut runPagedSeq(TinyLlmHandle *h, int lp_k) {
     out.tokens.push_back(next);
     collect();
 
-    nb = 4;
+    // 块表随可见窗口增长：visible = 48+i+1，第 17 步起需要第 5 块
     for (int i = 0; i < kDecodeSteps; ++i) {
-        rc = decodeStep(h, kFeedToken, nb, &next, lp.data(), lp_k);
+        const int need = (kPromptLen + i + 1 + kBlockSize - 1) / kBlockSize;
+        rc = decodeStep(h, kFeedToken, need, &next, lp.data(), lp_k);
         out.steps_rc.push_back(rc);
         if (rc != 0 || next < 0) break;
         out.tokens.push_back(next);
