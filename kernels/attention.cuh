@@ -47,6 +47,35 @@ void attention_decode(const half *__restrict__ query, const half *__restrict__ k
                       int num_q_heads, int num_kv_heads, int visible_len, int head_dim,
                       cudaStream_t stream = 0);
 
+// Direct paged decode attention（TLLM-P0-004）：直接从物理 K/V pool + block table 寻址，
+// 不再把可见窗口 gather 到连续 scratch。语义与 "gather 到连续缓冲后调用
+// attention_decode" 完全等价（包括非法块 id 视为零行的既有语义），因此两条路径的输出
+// 必须逐位相同——由 tests/test_paged_direct.cpp 守护。
+//
+// 几何与寻址（与 kernels/paged_kv.cu 的 scatter/gather 一致）：
+//   kv_dim       = num_kv_heads * head_dim
+//   b = t / block_size;  r = t % block_size;  p = block_table[b]
+//   K[ℓ,t,kh,d] 偏移 = (p * block_size + r) * kv_dim + kh * head_dim + d
+// k_pool_layer / v_pool_layer 是**已含 layer 偏移**的本层指针（由 caller 计算）。
+//
+// 前置条件（由 TransformerLayer::forwardPaged 的 host 校验保证，kernel 侧另做
+// 廉价防御性检查，不作为错误契约）：
+//   - 指针非空；num_q_heads > 0、num_kv_heads > 0、num_q_heads % num_kv_heads == 0；
+//   - head_dim > 0 且动态共享内存需求 (ATTEND_TILE+8+head_dim)*4 + head_dim*2
+//     + ATTEND_TILE*4 + head_dim*2 在设备上限内；
+//   - block_size > 0、max_num_blocks > 0；
+//   - table_len >= ceil(visible_tokens / block_size)（table_len 不足时按零行处理，
+//     不会越界读块表）；
+//   - *device_visible_tokens == 本步可见 KV 长度（decode 时为 position + 1）。
+//
+// visible_tokens 走 device int，launch 路径无 D2H、无分配，因此可被 CUDA Graph 捕获。
+void attention_decode_paged(const half *__restrict__ query, const half *__restrict__ k_pool_layer,
+                            const half *__restrict__ v_pool_layer,
+                            const int *__restrict__ block_table, half *__restrict__ output,
+                            float scale, int num_q_heads, int num_kv_heads, int head_dim,
+                            const int *device_visible_tokens, int block_size, int max_num_blocks,
+                            int table_len, cudaStream_t stream = 0);
+
 // Prefill attention: full sequence with causal masking
 // Q: [S, Hq,  D]
 // K: [S, Hkv, D]

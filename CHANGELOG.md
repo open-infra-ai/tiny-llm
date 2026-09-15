@@ -6,6 +6,23 @@ All notable tracked releases of Tiny-LLM are recorded here.
 
 ### Added
 
+- `kernels/attention.{cuh,cu}::attention_decode_paged`（TLLM-P0-004）：decode 阶段直接
+  按物理 K/V pool + block table 寻址的 attention，不再把可见窗口 gather 成连续
+  scratch。语义与 "gather 到连续缓冲后调用 `attention_decode`" 完全等价——包括
+  非法块 id 与 `b >= table_len` 一律按零行处理（零 K 行点积为 0、零 V 行贡献为 0，
+  但仍参与 softmax 归一化）。`visible_tokens` 走 device int，launch 路径无 D2H、
+  无分配，保持 CUDA Graph 可捕获。**尚未接入 Transformer dispatch**（属后续 PR），
+  因此当前生产 decode 路径行为不变。
+- decode 的 online-softmax 循环抽取为 `decode_online_softmax` 模板 + 取址策略
+  （`ContiguousRows` / `PagedRows`），连续 KV 与分页 KV 共用同一份归约循环。无效行
+  由策略返回**共享内存零行**而不是 `nullptr`，循环内因此没有任何有效性分支，累加
+  表达式保持不变。该抽取会给 `attention_decode` 带来已测量的 **+1.4~2.3%** kernel
+  回归（最坏 +4.9%，同进程交替 A/B，见 issue #8 与设计包 §10.1）；之所以接受，是因为
+  复制方案唯一的风险（两份实现漂移）已由下面的"逐位相同"门禁自动覆盖。
+- `tests/test_paged_direct.cpp`：direct 路径的差分门禁——同一份 pool 上
+  `attention_decode_paged` 与 legacy（scatter + gather + `attention_decode`）的输出
+  **逐位相同**（12 组几何 × 3 seed），并另外对照独立 oracle；覆盖非法块 id、
+  `visible_tokens = 0`、块表长度不足、多 layer pool offset。
 - `tests/paged_attention_oracle.h`（TLLM-P0-002）：不依赖外部 GGUF 的
   paged/contiguous synthetic correctness oracle。纯 host 参考实现，冻结 paged KV
   地址公式、块表长度 contract 与 GQA 映射，并独立计算 fp32 decode attention；
@@ -44,6 +61,13 @@ All notable tracked releases of Tiny-LLM are recorded here.
 
 ### Tests
 
+- TLLM-P0-004 direct paged kernel（5 项）：direct 与 legacy 在同一 pool、同一块表、
+  同一输入下**逐位相同**；`compute-sanitizer --tool memcheck` 0 error。变异检验三项：
+  ① 块内偏移写错（`r+1`）→ 被逐位门禁捕获；② 去掉 `table_len` 防护 → 被短块表用例
+  捕获；③ **在共享循环里丢掉 online rescale**（两条路径同等出错）→ 逐位门禁通过、由
+  独立 oracle 捕获——这验证了"共享归约 + 独立参考"分层门禁的必要性。
+  边界：本变更只测 kernel 级接口，**未**接入 Transformer dispatch，也不产生任何
+  性能数字（kernel 级收益必须由后续 benchmark PR 单独给出）。
 - TLLM-P0-002 oracle（8 项）：kernel 级与 layer 级 paged/contiguous 差分，覆盖
   block_size 1/16/32、跨块尾部、MHA/GQA/MQA、head_dim 32/64/128、绝对位置增量
   scatter、多 layer pool offset、非法块 id 与过短块表、随机 seed；oracle 已做变异
