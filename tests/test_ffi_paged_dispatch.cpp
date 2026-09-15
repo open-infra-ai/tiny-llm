@@ -353,14 +353,20 @@ SeqOut runPagedSeq(TinyLlmHandle *h, int lp_k) {
         for (const auto &[id, pa] : a.probs[s]) {
             const auto  it = b.probs[s].find(id);
             const float pb = (it == b.probs[s].end()) ? 0.0f : it->second;
+            // NaN 不会通过 >tol 比较暴露（NaN>x 恒 false），必须显式拒绝。
+            if (!std::isfinite(pa) || !std::isfinite(pb))
+                return ::testing::AssertionFailure() << "step " << s << " token " << id
+                                                     << ": non-finite prob " << pa << " vs " << pb;
             if (std::fabs(pa - pb) > tol)
                 return ::testing::AssertionFailure()
                        << "step " << s << " token " << id << ": prob " << pa << " vs " << pb;
         }
         for (const auto &[id, pb] : b.probs[s]) {
-            if (a.probs[s].count(id) == 0 && pb > tol)
-                return ::testing::AssertionFailure()
-                       << "step " << s << " token " << id << ": prob 0 vs " << pb;
+            if (a.probs[s].count(id) == 0) {
+                if (!std::isfinite(pb) || pb > tol)
+                    return ::testing::AssertionFailure()
+                           << "step " << s << " token " << id << ": prob 0 vs " << pb;
+            }
         }
     }
     return ::testing::AssertionSuccess();
@@ -398,6 +404,23 @@ TEST_F(FfiPagedDispatchTest, DirectAutoAndSplitKvMatchLegacyThroughCAbi) {
     paged.set("direct");
     splitkv.set("1");
     EXPECT_EQ(runPagedSeq(h.get(), 0).tokens, base_tok.tokens) << "splitkv=1 anchor";
+
+    // 加强：逐位等价模式的**概率分布**也必须逐位相同（probs 由 logits 经
+    // host fp32 softmax 推出——logits 逐位 ⇒ probs 逐位）。token id 只证明
+    // argmax 一致，无法区分"同分布"与"概率在小数点后漂移"；容差 0 即逐位比较。
+    paged.set("legacy");
+    splitkv.unset();
+    const SeqOut base_exact = runPagedSeq(h.get(), kVocab);
+    for (const char *mode : {"direct", "auto"}) {
+        paged.set(mode);
+        splitkv.unset();
+        EXPECT_TRUE(probsNear(base_exact, runPagedSeq(h.get(), kVocab), 0.0f))
+            << "bitwise mode=" << mode;
+    }
+    paged.set("direct");
+    splitkv.set("1");
+    EXPECT_TRUE(probsNear(base_exact, runPagedSeq(h.get(), kVocab), 0.0f))
+        << "bitwise splitkv-env=1";
 
     // splitkv>1：逐步比较完整概率分布（容忍 fp32 归约序差异）。
     // 开关同时作用于 direct 与 legacy 两条入口——只测 direct 会让 legacy
