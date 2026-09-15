@@ -171,6 +171,14 @@ cmake --build build -j$(nproc)
 # （ncu 剖析时需要）。构建必须用 -DCMAKE_CUDA_ARCHITECTURES=native，否则会编到
 # sm_75 而设备是 sm_120；--clock-warmup 用于规避空闲时 SM 停在低频。
 # 结果归档见 results/2026-09-14-rtx5070ti-dpa.md。
+
+# split-KV 扫描（TLLM-ATTN-SPLITKV PR-D，schema v2）：
+./build/tiny_llm_kernel_bench --dpa-bench --num-splits 1,2,4,8,16 \
+  --warmup 20 --reps 1000 --batch 100 --repeats 3 --clock-warmup 4 \
+  --out /tmp/splitkv.raw.jsonl
+# --num-splits 逗号分隔，取值 1..32；num_splits=1 走 split-KV 入口且逐位
+# 等价单遍（anchor），>1 按 2e-3 容差比对。v1 字段保留兼容。
+# 结果归档见 results/2026-09-15-rtx5070ti-splitkv.md。
 ```
 
 测量对象为 decode 路径真实 shape（Qwen2.5-0.5B）：W8A16 GEMM（M=1, K=896,

@@ -298,11 +298,14 @@ double benchElementwise(const char *name, int n, int warmup, int iters) {
 
 // ===========================================================================
 // TLLM-P0-004 PR-5：三路 decode attention kernel benchmark（设计包 §9）
+// TLLM-ATTN-SPLITKV PR-D：--num-splits 把每条基准路径扩展出 *_splitkv 变体
+// （contiguous_splitkv / direct_splitkv / legacy_splitkv），schema 升 v2。
 //
-// 只做 kernel 级测量，不产生 TTFT/TPOT。三条路径消费同一份逻辑 K/V：
+// 只做 kernel 级测量，不产生 TTFT/TPOT。路径消费同一份逻辑 K/V：
 //   legacy     = paged_gather_blocks(K) + paged_gather_blocks(V) + attention_decode
 //   contiguous = attention_decode（连续 scratch，仅作上界参考）
 //   direct     = attention_decode_paged
+//   *_splitkv  = 同取址方式、attention_decode[_paged]_splitkv（partial + combine）
 // gather_k / gather_v 单独计时，用于区分「省下的 gather」与「direct 自身开销」。
 //
 // §10.1 记录的三个测量陷阱在本文件内规避：
@@ -328,6 +331,7 @@ struct DpaArgs {
     const char                                      *out_path = nullptr;
     int                                              only_visible = 0;
     int                                              only_block_size = 0;
+    std::vector<int>                                 num_splits;
     std::vector<std::pair<std::string, std::string>> meta;
 };
 
@@ -343,9 +347,52 @@ constexpr int kDpaHq = 14;
 constexpr int kDpaHkv = 2;
 constexpr int kDpaHeadDim = 64;
 
-enum DpaPath { kLegacy = 0, kContiguous, kDirect, kGatherK, kGatherV, kNumPaths };
-const char *const kDpaPathNames[kNumPaths] = {"legacy", "contiguous", "direct", "gather_k",
-                                              "gather_v"};
+enum DpaPath { kLegacy = 0, kContiguous, kDirect, kGatherK, kGatherV };
+const char *const kDpaPathNames[] = {"legacy", "contiguous", "direct", "gather_k", "gather_v"};
+
+// TLLM-ATTN-SPLITKV PR-D：split-KV 变体按 (kind, num_splits) 参数化。
+// num_splits == 0 表示非 split 的单遍路径；>0 走 *_splitkv 入口（含 num_splits == 1，
+// 用于直接量出「多一次 combine launch」的纯开销，回答设计包 §2 的未知数 3）。
+struct DpaPathSpec {
+    DpaPath     kind;
+    int         num_splits;
+    std::string name; // "legacy" / "contiguous_splitkv" / ...
+};
+
+std::vector<DpaPathSpec> dpaPaths(const DpaArgs &args) {
+    std::vector<DpaPathSpec> paths = {{kLegacy, 0, "legacy"},
+                                      {kContiguous, 0, "contiguous"},
+                                      {kDirect, 0, "direct"},
+                                      {kGatherK, 0, "gather_k"},
+                                      {kGatherV, 0, "gather_v"}};
+    std::vector<int>         uniq;
+    for (int ns : args.num_splits) {
+        if (ns < 1) {
+            std::fprintf(stderr, "kernel_bench: --num-splits must be >= 1 (got %d)\n", ns);
+            std::exit(2);
+        }
+        if (std::find(uniq.begin(), uniq.end(), ns) == uniq.end()) uniq.push_back(ns);
+    }
+    for (int ns : uniq) {
+        paths.push_back({kContiguous, ns, "contiguous_splitkv"});
+        paths.push_back({kDirect, ns, "direct_splitkv"});
+        paths.push_back({kLegacy, ns, "legacy_splitkv"});
+    }
+    return paths;
+}
+
+// splitkv 路径的语义基准：同 kind 的单遍路径（§8：num_splits=1 必须逐位相同，
+// >1 落在 oracle 容差内——此处与 §9 的计时门禁共用同一组对照）。
+DpaPath dpaBaseKind(DpaPath kind) {
+    switch (kind) {
+    case kLegacy:
+        return kLegacy;
+    case kDirect:
+        return kDirect;
+    default:
+        return kContiguous;
+    }
+}
 
 std::vector<ShapeGeom> dpaShapes() {
     std::vector<ShapeGeom> shapes;
@@ -486,7 +533,9 @@ void dpaEmitProvenance(FILE *out, const DpaArgs &args, const cudaDeviceProp &pro
     char cc[16];
     std::snprintf(cc, sizeof(cc), "%d.%d", prop.major, prop.minor);
 
-    std::fprintf(out, "{\"type\":\"provenance\",\"schema\":\"tllm-dpa-kernel-bench-v1\"");
+    // v2 = v1 + num_splits sweep（TLLM-ATTN-SPLITKV PR-D）：sample/path_stats/
+    // shape_summary 记录多一个 "num_splits" 字段（非 split 路径为 0）。
+    std::fprintf(out, "{\"type\":\"provenance\",\"schema\":\"tllm-dpa-kernel-bench-v2\"");
     std::fprintf(
         out, ",\"gpu\":{\"name\":\"%s\",\"total_memory_mib\":%lu,\"compute_capability\":\"%s\"}",
         dpaJsonEscape(prop.name).c_str(),
@@ -502,6 +551,12 @@ void dpaEmitProvenance(FILE *out, const DpaArgs &args, const cudaDeviceProp &pro
                  args.seed, args.warmup, args.reps, args.batch, args.repeats);
     std::fprintf(out, ",\"geometry\":{\"num_q_heads\":%d,\"num_kv_heads\":%d,\"head_dim\":%d}",
                  kDpaHq, kDpaHkv, kDpaHeadDim);
+    if (!args.num_splits.empty()) {
+        std::fprintf(out, ",\"num_splits_sweep\":[");
+        for (size_t i = 0; i < args.num_splits.size(); ++i)
+            std::fprintf(out, "%s%d", i == 0 ? "" : ",", args.num_splits[i]);
+        std::fprintf(out, "]");
+    }
     std::fprintf(out, ",\"shapes\":[");
     for (size_t i = 0; i < shapes.size(); ++i) {
         std::fprintf(out, "%s{\"visible_tokens\":%d,\"block_size\":%d,\"table_len\":%d}",
@@ -530,20 +585,37 @@ void dpaRunShape(FILE *out, const DpaArgs &args, const ShapeGeom &g, int rounds)
         static_cast<size_t>(g.max_num_blocks) * static_cast<size_t>(g.block_size) * kv_dim;
     const size_t q_elems = static_cast<size_t>(kDpaHq) * kDpaHeadDim;
 
+    const std::vector<DpaPathSpec> paths = dpaPaths(args);
+    const size_t                   npaths = paths.size();
+
     half *d_k_pool = nullptr, *d_v_pool = nullptr, *d_k_scratch = nullptr, *d_v_scratch = nullptr;
-    half *d_q = nullptr, *d_out_legacy = nullptr, *d_out_contig = nullptr, *d_out_direct = nullptr;
+    half *d_q = nullptr;
     int  *d_table = nullptr, *d_len = nullptr;
     check(cudaMalloc(&d_k_pool, pool_elems * sizeof(half)), "cudaMalloc k_pool");
     check(cudaMalloc(&d_v_pool, pool_elems * sizeof(half)), "cudaMalloc v_pool");
     check(cudaMalloc(&d_k_scratch, pool_elems * sizeof(half)), "cudaMalloc k_scratch");
     check(cudaMalloc(&d_v_scratch, pool_elems * sizeof(half)), "cudaMalloc v_scratch");
     check(cudaMalloc(&d_q, q_elems * sizeof(half)), "cudaMalloc q");
-    check(cudaMalloc(&d_out_legacy, q_elems * sizeof(half)), "cudaMalloc out_legacy");
-    check(cudaMalloc(&d_out_contig, q_elems * sizeof(half)), "cudaMalloc out_contig");
-    check(cudaMalloc(&d_out_direct, q_elems * sizeof(half)), "cudaMalloc out_direct");
+    // 每条路径一个输出缓冲，等价性检查需要同时拿到所有路径的输出。
+    std::vector<half *> d_out(npaths, nullptr);
+    for (size_t i = 0; i < npaths; ++i)
+        check(cudaMalloc(&d_out[i], q_elems * sizeof(half)), "cudaMalloc out");
     check(cudaMalloc(&d_table, static_cast<size_t>(g.max_num_blocks) * sizeof(int)),
           "cudaMalloc table");
     check(cudaMalloc(&d_len, sizeof(int)), "cudaMalloc len");
+
+    // split-KV partial 缓冲：按本 shape 内最大的 num_splits 一次性分配，
+    // 所有 split 路径复用（调用串行、同 stream，无并发）。布局见
+    // docs/architecture/decode-attention-splitkv-design.md §4.3。
+    float *d_partial = nullptr;
+    int    max_splits = 0;
+    for (const auto &p : paths)
+        max_splits = std::max(max_splits, p.num_splits);
+    if (max_splits > 0) {
+        const size_t floats =
+            static_cast<size_t>(kDpaHq) * static_cast<size_t>(max_splits) * (2 + kDpaHeadDim);
+        check(cudaMalloc(&d_partial, floats * sizeof(float)), "cudaMalloc partial");
+    }
 
     const unsigned seed = args.seed + static_cast<unsigned>(g.visible * 131 + g.block_size);
     const std::vector<half> h_q = dpaRandom(q_elems, seed + 1);
@@ -584,24 +656,44 @@ void dpaRunShape(FILE *out, const DpaArgs &args, const ShapeGeom &g, int rounds)
 
     const float scale = 1.0f / std::sqrt(static_cast<float>(kDpaHeadDim));
 
-    auto runPath = [&](DpaPath p) {
-        switch (p) {
+    auto runPath = [&](size_t pi) {
+        const DpaPathSpec &s = paths[pi];
+        switch (s.kind) {
         case kLegacy:
             tiny_llm::kernels::paged_gather_blocks(d_k_scratch, d_k_pool, d_table, g.visible,
                                                    g.block_size, kv_dim, g.max_num_blocks, 0);
             tiny_llm::kernels::paged_gather_blocks(d_v_scratch, d_v_pool, d_table, g.visible,
                                                    g.block_size, kv_dim, g.max_num_blocks, 0);
-            tiny_llm::kernels::attention_decode(d_q, d_k_scratch, d_v_scratch, d_out_legacy, scale,
-                                                kDpaHq, kDpaHkv, d_len, kDpaHeadDim, 0);
+            if (s.num_splits > 0) {
+                tiny_llm::kernels::attention_decode_splitkv(
+                    d_q, d_k_scratch, d_v_scratch, d_out[pi], scale, kDpaHq, kDpaHkv, d_len,
+                    kDpaHeadDim, d_partial, s.num_splits, 0);
+            } else {
+                tiny_llm::kernels::attention_decode(d_q, d_k_scratch, d_v_scratch, d_out[pi], scale,
+                                                    kDpaHq, kDpaHkv, d_len, kDpaHeadDim, 0);
+            }
             break;
         case kContiguous:
-            tiny_llm::kernels::attention_decode(d_q, d_k_scratch, d_v_scratch, d_out_contig, scale,
-                                                kDpaHq, kDpaHkv, d_len, kDpaHeadDim, 0);
+            if (s.num_splits > 0) {
+                tiny_llm::kernels::attention_decode_splitkv(
+                    d_q, d_k_scratch, d_v_scratch, d_out[pi], scale, kDpaHq, kDpaHkv, d_len,
+                    kDpaHeadDim, d_partial, s.num_splits, 0);
+            } else {
+                tiny_llm::kernels::attention_decode(d_q, d_k_scratch, d_v_scratch, d_out[pi], scale,
+                                                    kDpaHq, kDpaHkv, d_len, kDpaHeadDim, 0);
+            }
             break;
         case kDirect:
-            tiny_llm::kernels::attention_decode_paged(
-                d_q, d_k_pool, d_v_pool, d_table, d_out_direct, scale, kDpaHq, kDpaHkv, kDpaHeadDim,
-                d_len, g.block_size, g.max_num_blocks, g.table_len, 0);
+            if (s.num_splits > 0) {
+                tiny_llm::kernels::attention_decode_paged_splitkv(
+                    d_q, d_k_pool, d_v_pool, d_table, d_out[pi], scale, kDpaHq, kDpaHkv,
+                    kDpaHeadDim, d_len, g.block_size, g.max_num_blocks, g.table_len, d_partial,
+                    s.num_splits, 0);
+            } else {
+                tiny_llm::kernels::attention_decode_paged(
+                    d_q, d_k_pool, d_v_pool, d_table, d_out[pi], scale, kDpaHq, kDpaHkv,
+                    kDpaHeadDim, d_len, g.block_size, g.max_num_blocks, g.table_len, 0);
+            }
             break;
         case kGatherK:
             tiny_llm::kernels::paged_gather_blocks(d_k_scratch, d_k_pool, d_table, g.visible,
@@ -616,45 +708,76 @@ void dpaRunShape(FILE *out, const DpaArgs &args, const ShapeGeom &g, int rounds)
         }
     };
 
-    // ── 先正确性、后计时：三条路径在同一输入上必须逐位一致（设计包 §8）─────────
-    bool  equiv_ok = true;
-    float max_abs_diff = 0.0f;
+    // ── 先正确性、后计时：所有路径在同一输入上对比（设计包 §8）───────────────
+    // 单遍三路：legacy/direct 必须逐位一致（v1 门禁原样保留为 equiv_bitwise）。
+    // split 路径：对照同 kind 的单遍输出；num_splits==1 必须逐位相同（锚点），
+    // num_splits>1 允许 fp32 求和顺序差异（oracle 容差 2e-3，记录 max|diff|）。
+    bool equiv_bitwise = true;
+    bool equiv_ok = true;
     {
-        for (int p = kLegacy; p <= kDirect; ++p)
-            runPath(static_cast<DpaPath>(p));
+        for (size_t pi = 0; pi < npaths; ++pi)
+            runPath(pi);
         check(cudaDeviceSynchronize(), "equivalence sync");
 
-        std::vector<half> h_legacy(q_elems), h_direct(q_elems), h_contig(q_elems);
-        check(cudaMemcpy(h_legacy.data(), d_out_legacy, q_elems * sizeof(half),
-                         cudaMemcpyDeviceToHost),
-              "copy out_legacy");
-        check(cudaMemcpy(h_direct.data(), d_out_direct, q_elems * sizeof(half),
-                         cudaMemcpyDeviceToHost),
-              "copy out_direct");
-        check(cudaMemcpy(h_contig.data(), d_out_contig, q_elems * sizeof(half),
-                         cudaMemcpyDeviceToHost),
-              "copy out_contig");
+        std::vector<std::vector<half>> h_out(npaths, std::vector<half>(q_elems));
+        for (size_t pi = 0; pi < npaths; ++pi)
+            check(cudaMemcpy(h_out[pi].data(), d_out[pi], q_elems * sizeof(half),
+                             cudaMemcpyDeviceToHost),
+                  "copy out");
 
-        equiv_ok = std::memcmp(h_legacy.data(), h_direct.data(), q_elems * sizeof(half)) == 0;
+        // 单遍基准路径在 paths 中的固定下标（dpaPaths 构造顺序）。
+        const size_t i_legacy = 0, i_contig = 1, i_direct = 2;
+        equiv_bitwise = std::memcmp(h_out[i_legacy].data(), h_out[i_direct].data(),
+                                    q_elems * sizeof(half)) == 0;
+        equiv_ok = equiv_bitwise;
+        float max_abs_diff = 0.0f;
         for (size_t i = 0; i < q_elems; ++i) {
-            max_abs_diff = std::max(
-                max_abs_diff, std::fabs(__half2float(h_legacy[i]) - __half2float(h_direct[i])));
+            max_abs_diff = std::max(max_abs_diff, std::fabs(__half2float(h_out[i_legacy][i]) -
+                                                            __half2float(h_out[i_direct][i])));
         }
         std::fprintf(
             out,
             "{\"type\":\"equivalence\",\"shape\":{\"visible_tokens\":%d,\"block_size\":%d},"
             "\"legacy_vs_direct_bitwise_equal\":%s,\"legacy_vs_direct_max_abs_diff\":%.6g,"
             "\"legacy_vs_contiguous_bitwise_equal\":%s}\n",
-            g.visible, g.block_size, equiv_ok ? "true" : "false", max_abs_diff,
-            std::memcmp(h_legacy.data(), h_contig.data(), q_elems * sizeof(half)) == 0 ? "true"
-                                                                                       : "false");
+            g.visible, g.block_size, equiv_bitwise ? "true" : "false", max_abs_diff,
+            std::memcmp(h_out[i_legacy].data(), h_out[i_contig].data(), q_elems * sizeof(half)) == 0
+                ? "true"
+                : "false");
+
+        // 每个 split 路径一条 equivalence_splitkv 记录；ref 是同 kind 单遍路径。
+        for (size_t pi = 0; pi < npaths; ++pi) {
+            const DpaPathSpec &s = paths[pi];
+            if (s.num_splits == 0) continue;
+            const DpaPath ref_kind = dpaBaseKind(s.kind);
+            size_t        ref = npaths;
+            for (size_t r = 0; r < npaths; ++r)
+                if (paths[r].kind == ref_kind && paths[r].num_splits == 0) ref = r;
+            if (ref == npaths) continue;
+            const bool bitwise =
+                std::memcmp(h_out[pi].data(), h_out[ref].data(), q_elems * sizeof(half)) == 0;
+            float diff = 0.0f;
+            for (size_t i = 0; i < q_elems; ++i)
+                diff = std::max(
+                    diff, std::fabs(__half2float(h_out[pi][i]) - __half2float(h_out[ref][i])));
+            // num_splits==1 的锚点失败与 >1 超出容差都计入 equiv_ok。
+            const bool ok = s.num_splits == 1 ? bitwise : diff <= 2e-3f;
+            equiv_ok = equiv_ok && ok;
+            std::fprintf(out,
+                         "{\"type\":\"equivalence_splitkv\",\"shape\":{\"visible_tokens\":%d,"
+                         "\"block_size\":%d},\"path\":\"%s\",\"num_splits\":%d,\"ref_path\":\"%s\","
+                         "\"bitwise_equal\":%s,\"max_abs_diff\":%.6g,\"within_tolerance\":%s}\n",
+                         g.visible, g.block_size, s.name.c_str(), s.num_splits,
+                         kDpaPathNames[ref_kind], bitwise ? "true" : "false", diff,
+                         ok ? "true" : "false");
+        }
         std::fflush(out);
     }
 
     // ── 预热（每次调用都跑，不带 sync）──────────────────────────────────────
-    for (int p = 0; p < kNumPaths; ++p)
+    for (size_t pi = 0; pi < npaths; ++pi)
         for (int i = 0; i < args.warmup; ++i)
-            runPath(static_cast<DpaPath>(p));
+            runPath(pi);
     check(cudaDeviceSynchronize(), "warmup sync");
 
     // ── 采样：路径按 round 轮转，抑制时钟漂移 ───────────────────────────────
@@ -663,13 +786,12 @@ void dpaRunShape(FILE *out, const DpaArgs &args, const ShapeGeom &g, int rounds)
     check(cudaEventCreate(&e1), "cudaEventCreate");
 
     std::vector<std::vector<std::vector<double>>> samples(
-        static_cast<size_t>(kNumPaths),
-        std::vector<std::vector<double>>(static_cast<size_t>(args.repeats)));
+        npaths, std::vector<std::vector<double>>(static_cast<size_t>(args.repeats)));
 
-    auto timePath = [&](DpaPath p) {
+    auto timePath = [&](size_t pi) {
         check(cudaEventRecord(e0, 0), "event record start");
         for (int i = 0; i < args.batch; ++i)
-            runPath(p);
+            runPath(pi);
         check(cudaEventRecord(e1, 0), "event record stop");
         check(cudaEventSynchronize(e1), "event sync");
         float ms = 0.0f;
@@ -679,15 +801,16 @@ void dpaRunShape(FILE *out, const DpaArgs &args, const ShapeGeom &g, int rounds)
 
     for (int rep = 0; rep < args.repeats; ++rep) {
         for (int r = 0; r < rounds; ++r) {
-            for (int off = 0; off < kNumPaths; ++off) {
-                const int    p = (r + off) % kNumPaths;
-                const double ms = timePath(static_cast<DpaPath>(p));
-                samples[static_cast<size_t>(p)][static_cast<size_t>(rep)].push_back(ms);
+            for (size_t off = 0; off < npaths; ++off) {
+                const size_t pi = (static_cast<size_t>(r) + off) % npaths;
+                const double ms = timePath(pi);
+                samples[pi][static_cast<size_t>(rep)].push_back(ms);
                 std::fprintf(out,
                              "{\"type\":\"sample\",\"shape\":{\"visible_tokens\":%d,"
-                             "\"block_size\":%d},\"path\":\"%s\",\"repeat\":%d,\"order\":%d,"
-                             "\"ms\":%.6f}\n",
-                             g.visible, g.block_size, kDpaPathNames[p], rep, p, ms);
+                             "\"block_size\":%d},\"path\":\"%s\",\"num_splits\":%d,\"repeat\":%d,"
+                             "\"order\":%zu,\"ms\":%.6f}\n",
+                             g.visible, g.block_size, paths[pi].name.c_str(), paths[pi].num_splits,
+                             rep, pi, ms);
             }
         }
         std::fflush(out);
@@ -698,15 +821,16 @@ void dpaRunShape(FILE *out, const DpaArgs &args, const ShapeGeom &g, int rounds)
     check(cudaEventDestroy(e1), "cudaEventDestroy");
 
     // ── 聚合 + 收敛判定 ────────────────────────────────────────────────────
-    // 收敛门禁只约束三条**对比路径**（legacy / contiguous / direct）。gather_k /
-    // gather_v 是辅助诊断（§9：用于区分「省下的 gather」与 direct 自身开销），
-    // 它们的单次耗时约 5 µs、落在 launch 噪声底之上，CV 天然偏高，单独报告但
-    // 不参与 shape 级收敛判定。
-    bool        converged = true;
-    bool        gathers_converged = true;
-    std::string not_converged_reason;
-    for (int p = 0; p < kNumPaths; ++p) {
-        const auto         &per_rep = samples[static_cast<size_t>(p)];
+    // 收敛门禁约束所有**被比较路径**：三条单遍路径 + 全部 splitkv 变体
+    // （splitkv 是本 benchmark 的测量对象）。gather_k / gather_v 仍是辅助诊断
+    // （§9：用于区分「省下的 gather」与 direct 自身开销），单次约 5 µs、落在
+    // launch 噪声底之上，CV 天然偏高，单独报告但不参与 shape 级收敛判定。
+    bool                converged = true;
+    bool                gathers_converged = true;
+    std::string         not_converged_reason;
+    std::vector<double> medians(npaths, 0.0);
+    for (size_t pi = 0; pi < npaths; ++pi) {
+        const auto         &per_rep = samples[pi];
         std::vector<double> pooled;
         std::vector<double> rep_medians;
         for (const auto &v : per_rep) {
@@ -715,7 +839,11 @@ void dpaRunShape(FILE *out, const DpaArgs &args, const ShapeGeom &g, int rounds)
         }
         const double cv = dpaCvPercent(pooled);
         const double pooled_median = dpaPercentile(pooled, 0.5);
-        const bool   is_gather = (p == kGatherK || p == kGatherV);
+        medians[pi] = pooled_median;
+        const bool        is_gather = (paths[pi].kind == kGatherK || paths[pi].kind == kGatherV);
+        const std::string pname = paths[pi].num_splits > 0
+                                      ? paths[pi].name + "@" + std::to_string(paths[pi].num_splits)
+                                      : paths[pi].name;
         for (double m : rep_medians) {
             if (pooled_median > 0.0 &&
                 std::fabs(m - pooled_median) / pooled_median * 100.0 > 10.0) {
@@ -723,8 +851,7 @@ void dpaRunShape(FILE *out, const DpaArgs &args, const ShapeGeom &g, int rounds)
                     gathers_converged = false;
                 } else {
                     converged = false;
-                    not_converged_reason =
-                        std::string(kDpaPathNames[p]) + " repeat-median spread > 10%";
+                    not_converged_reason = pname + " repeat-median spread > 10%";
                 }
             }
         }
@@ -733,44 +860,55 @@ void dpaRunShape(FILE *out, const DpaArgs &args, const ShapeGeom &g, int rounds)
                 gathers_converged = false;
             } else {
                 converged = false;
-                not_converged_reason = std::string(kDpaPathNames[p]) + " CV > 10%";
+                not_converged_reason = pname + " CV > 10%";
             }
         }
         std::fprintf(out,
                      "{\"type\":\"path_stats\",\"shape\":{\"visible_tokens\":%d,\"block_size\":%d},"
-                     "\"path\":\"%s\",\"n\":%zu,\"median_ms\":%.6f,\"p10_ms\":%.6f,\"p90_ms\":%.6f,"
+                     "\"path\":\"%s\",\"num_splits\":%d,\"n\":%zu,\"median_ms\":%.6f,"
+                     "\"p10_ms\":%.6f,\"p90_ms\":%.6f,"
                      "\"mean_ms\":%.6f,\"cv_percent\":%.3f,\"repeat_medians_ms\":[",
-                     g.visible, g.block_size, kDpaPathNames[p], pooled.size(), pooled_median,
-                     dpaPercentile(pooled, 0.10), dpaPercentile(pooled, 0.90), dpaMean(pooled), cv);
+                     g.visible, g.block_size, paths[pi].name.c_str(), paths[pi].num_splits,
+                     pooled.size(), pooled_median, dpaPercentile(pooled, 0.10),
+                     dpaPercentile(pooled, 0.90), dpaMean(pooled), cv);
         for (size_t i = 0; i < rep_medians.size(); ++i)
             std::fprintf(out, "%s%.6f", i == 0 ? "" : ",", rep_medians[i]);
         std::fprintf(out, "]}\n");
     }
 
-    std::vector<double> legacy_all, direct_all, contig_all;
-    for (const auto &v : samples[static_cast<size_t>(kLegacy)])
-        legacy_all.insert(legacy_all.end(), v.begin(), v.end());
-    for (const auto &v : samples[static_cast<size_t>(kDirect)])
-        direct_all.insert(direct_all.end(), v.begin(), v.end());
-    for (const auto &v : samples[static_cast<size_t>(kContiguous)])
-        contig_all.insert(contig_all.end(), v.begin(), v.end());
-    const double legacy_median = dpaPercentile(legacy_all, 0.5);
-    const double direct_median = dpaPercentile(direct_all, 0.5);
-    const double contig_median = dpaPercentile(contig_all, 0.5);
+    // 单遍三路在 paths 中的固定下标（dpaPaths 构造顺序）。
+    const double legacy_median = medians[0];
+    const double contig_median = medians[1];
+    const double direct_median = medians[2];
 
     std::fprintf(
         out,
         "{\"type\":\"shape_summary\",\"shape\":{\"visible_tokens\":%d,\"block_size\":%d,"
         "\"table_len\":%d,\"max_num_blocks\":%d},"
         "\"legacy_median_ms\":%.6f,\"contiguous_median_ms\":%.6f,\"direct_median_ms\":%.6f,"
-        "\"speedup_direct_vs_legacy\":%.4f,\"speedup_direct_vs_contiguous\":%.4f,"
-        "\"equiv_bitwise\":%s,\"converged\":%s,\"gathers_converged\":%s,"
-        "\"not_converged_reason\":\"%s\"}\n",
+        "\"speedup_direct_vs_legacy\":%.4f,\"speedup_direct_vs_contiguous\":%.4f,",
         g.visible, g.block_size, g.table_len, g.max_num_blocks, legacy_median, contig_median,
         direct_median, direct_median > 0.0 ? legacy_median / direct_median : 0.0,
-        direct_median > 0.0 ? contig_median / direct_median : 0.0, equiv_ok ? "true" : "false",
-        converged ? "true" : "false", gathers_converged ? "true" : "false",
-        dpaJsonEscape(not_converged_reason).c_str());
+        direct_median > 0.0 ? contig_median / direct_median : 0.0);
+    // splitkv 变体的中位数全部进 shape_summary，报告端按 num_splits 重建矩阵。
+    if (npaths > 5) {
+        std::fprintf(out, "\"splitkv_medians\":[");
+        bool first = true;
+        for (size_t pi = 0; pi < npaths; ++pi) {
+            if (paths[pi].num_splits == 0) continue;
+            std::fprintf(out, "%s{\"path\":\"%s\",\"num_splits\":%d,\"median_ms\":%.6f}",
+                         first ? "" : ",", paths[pi].name.c_str(), paths[pi].num_splits,
+                         medians[pi]);
+            first = false;
+        }
+        std::fprintf(out, "],");
+    }
+    std::fprintf(out,
+                 "\"equiv_bitwise\":%s,\"equiv_ok\":%s,\"converged\":%s,"
+                 "\"gathers_converged\":%s,\"not_converged_reason\":\"%s\"}\n",
+                 equiv_bitwise ? "true" : "false", equiv_ok ? "true" : "false",
+                 converged ? "true" : "false", gathers_converged ? "true" : "false",
+                 dpaJsonEscape(not_converged_reason).c_str());
     std::fflush(out);
 
     check(cudaFree(d_k_pool), "cudaFree k_pool");
@@ -778,11 +916,11 @@ void dpaRunShape(FILE *out, const DpaArgs &args, const ShapeGeom &g, int rounds)
     check(cudaFree(d_k_scratch), "cudaFree k_scratch");
     check(cudaFree(d_v_scratch), "cudaFree v_scratch");
     check(cudaFree(d_q), "cudaFree q");
-    check(cudaFree(d_out_legacy), "cudaFree out_legacy");
-    check(cudaFree(d_out_contig), "cudaFree out_contig");
-    check(cudaFree(d_out_direct), "cudaFree out_direct");
+    for (size_t pi = 0; pi < npaths; ++pi)
+        check(cudaFree(d_out[pi]), "cudaFree out");
     check(cudaFree(d_table), "cudaFree table");
     check(cudaFree(d_len), "cudaFree len");
+    if (d_partial != nullptr) check(cudaFree(d_partial), "cudaFree partial");
 }
 
 int runDpaBench(const DpaArgs &args) {
@@ -863,6 +1001,20 @@ DpaArgs parseDpaArgs(int argc, char **argv) {
             args.only_visible = std::stoi(next("--only-visible"));
         } else if (a == "--only-block-size") {
             args.only_block_size = std::stoi(next("--only-block-size"));
+        } else if (a == "--num-splits") {
+            // TLLM-ATTN-SPLITKV PR-D：可重复，也接受逗号分隔（如 2,4,8,16）。
+            // 每个取值生成 contiguous_splitkv / direct_splitkv / legacy_splitkv
+            // 三条路径；含 1 时量出纯 combine launch 开销。不给则不跑 splitkv。
+            const std::string v = next("--num-splits");
+            size_t            pos = 0;
+            while (pos <= v.size()) {
+                const size_t      comma = v.find(',', pos);
+                const std::string tok =
+                    v.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+                if (!tok.empty()) args.num_splits.push_back(std::stoi(tok));
+                if (comma == std::string::npos) break;
+                pos = comma + 1;
+            }
         } else if (a == "--out") {
             args.out_path = argv[++i];
         } else if (a == "--meta") {
@@ -878,7 +1030,7 @@ DpaArgs parseDpaArgs(int argc, char **argv) {
                          "usage: tiny_llm_kernel_bench [--dpa-bench] [--warmup N] [--reps N]\n"
                          "       [--batch N] [--repeats N] [--clock-warmup SECONDS] [--seed N]\n"
                          "       [--only-visible N] [--only-block-size N] [--out PATH]\n"
-                         "       [--meta key=value]\n");
+                         "       [--num-splits N[,M,...]] [--meta key=value]\n");
             std::exit(0);
         } else {
             std::fprintf(stderr, "kernel_bench: unknown argument \"%s\" (see --help)\n", a.c_str());

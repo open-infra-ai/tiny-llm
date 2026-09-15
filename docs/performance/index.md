@@ -52,6 +52,26 @@
 完整表格、分解、收敛限制与 ncu 证据见
 [2026-09-14-rtx5070ti-dpa](results/2026-09-14-rtx5070ti-dpa.md)。
 
+## kernel 级基准：split-KV decode attention（2026-09-15，schema `tllm-dpa-kernel-bench-v2`）
+
+`--dpa-bench --num-splits 1,2,4,8,16` 在 PR-5 同协议下追加 `*_splitkv` 路径
+（contiguous / direct / legacy × 5 个 num_splits），回答"把长上下文拆成多个
+partial 再 combine 能否解开 14-block 并行瓶颈"。等价性：`num_splits=1` 逐位
+等于单遍（96/96），`num_splits>1` 在 2e-3 容差内（384/384，实测最大
+`6.1e-05`）。
+
+| 项 | 值 |
+|----|----|
+| 硬件 | RTX 5070 Ti 16GB（sm_120），CUDA 13.3.73 / 驱动 615.65.06 |
+| commit | `2eb97b2`（clean）；被测 kernel 为 `508df46`（PR-B） |
+| 采样 | 同 PR-5；32 shape 中 4 个全部路径 CV ≤ 10%（均在 `visible ≥ 1024`） |
+| 结论 | **`visible ≥ ~256` 起 split-KV 占优，`visible=2048` 时 `direct_splitkv@16` 比单遍 direct 快 6.0×；`visible ≤ 129` 回退最多 ~1.9×。`TLLM_ATTN_SPLITKV` 默认保持关闭** |
+
+ncu 佐证：occupancy 8.35% → 13.08%（≈block 数 14→112 / 70 SM），SM
+throughput 0.86% → 6.04%；机制是块间并行掩盖 latency，不是 occupancy 饱和。
+完整表格与限制见
+[2026-09-15-rtx5070ti-splitkv](results/2026-09-15-rtx5070ti-splitkv.md)。
+
 ## 章节
 
 - [基准测试](./benchmarks) - 基准测试方法与计划
