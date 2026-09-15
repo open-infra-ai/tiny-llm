@@ -9,6 +9,13 @@
 
 namespace tiny_llm {
 
+// split-KV decode attention（TLLM-ATTN-SPLITKV）partial 工作区的 split 数上界。
+//
+// 运行时开关 TLLM_ATTN_SPLITKV 允许 1..kAttnMaxSplits，而缓冲按**上界**一次性分配：
+// 这样"每次调用重新解析环境变量"（不缓存、因而测试里 setenv 即时生效、且不需要为测试
+// 暴露 reset seam）与"分配大小固定"可以同时成立，不会因为运行中改小/改大取值而越界。
+inline constexpr int kAttnMaxSplits = 32;
+
 // 共享中间激活工作区：所有 TransformerLayer 复用同一组 GPU 缓冲。
 // 推理逐层串行，同一时刻只有一个层在使用这些缓冲；每层独立分配会按
 // 层数线性放大显存（24 层 × ~0.9GB 必然 OOM）。
@@ -22,8 +29,11 @@ struct LayerWorkspace {
     half *ffn_gate = nullptr;    // [max_batch, intermediate_dim]
     half *ffn_up = nullptr;      // [max_batch, intermediate_dim]
     half *ffn_output = nullptr;  // [max_batch, hidden_dim]
-    int   max_batch_tokens = 0;
-    bool  allocated = false;
+    // split-KV partial：[num_heads * kAttnMaxSplits * (2 + head_dim)] fp32，布局见
+    // kernels/attention.cuh。kernel 零分配，缓冲由这里持有（层间串行，可复用）。
+    float *attn_partial = nullptr;
+    int    max_batch_tokens = 0;
+    bool   allocated = false;
 
     void allocate(const ModelConfig &config);
     void free();

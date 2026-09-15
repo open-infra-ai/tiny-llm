@@ -57,8 +57,15 @@ Result<std::unique_ptr<KVCacheManager>> KVCacheManager::create(const KVCacheConf
         slot.max_len = config.max_seq_len;
     }
 
-    // 任务 3.2：append 写位置的 device int 缓冲（CUDA Graph 重放前置）
+    // 任务 3.2：append 写位置的 device int 缓冲（CUDA Graph 重放前置）。
+    // 必须显式清零（与 memory_pool_ 同样的约定）：cudaMalloc 不保证返回清零内存，
+    // 调用方若未先 setAppendPos，appendKV 会按垃圾值写 K/V（静默写错位置）。
     manager->append_pos_ = DeviceBuffer<int>(1);
+    err = cudaMemset(manager->append_pos_.data(), 0, sizeof(int));
+    if (err != cudaSuccess) {
+        return Result<std::unique_ptr<KVCacheManager>>::err(
+            std::string("KVCacheManager: append_pos_ init failed: ") + cudaGetErrorString(err));
+    }
 
     return Result<std::unique_ptr<KVCacheManager>>::ok(std::move(manager));
 }

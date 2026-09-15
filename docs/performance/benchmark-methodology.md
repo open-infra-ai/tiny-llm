@@ -156,11 +156,29 @@ Laptop，详见 [2026-08-18-rtx3060](results/2026-08-18-rtx3060.md) 与
 因此 kernel 级瓶颈分析改用仓库内微基准 **`tiny_llm_kernel_bench`**：
 
 ```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CUDA_ARCHITECTURES=native
 cmake --build build -j$(nproc)
 ./build/tiny_llm_kernel_bench
 # 输出 CSV：<name>,<shape>,<ms>
 # 每项先 warmup 20 次，再测 200 次（lm_head 100 次），
 # 循环前后各一次 cudaDeviceSynchronize，std::chrono::steady_clock 均值。
+
+# 三路 decode attention 对比（TLLM-P0-004 PR-5）：
+./build/tiny_llm_kernel_bench --dpa-bench --warmup 20 --reps 1000 --batch 100 \
+  --repeats 3 --clock-warmup 4 --out /tmp/dpa.raw.jsonl
+# --dpa-bench 输出 JSONL（provenance / equivalence / sample / path_stats / shape_summary）。
+# 每个样本 = batch 次背靠背调用的均值；--only-visible/--only-block-size 用于隔离单形状
+# （ncu 剖析时需要）。构建必须用 -DCMAKE_CUDA_ARCHITECTURES=native，否则会编到
+# sm_75 而设备是 sm_120；--clock-warmup 用于规避空闲时 SM 停在低频。
+# 结果归档见 results/2026-09-14-rtx5070ti-dpa.md。
+
+# split-KV 扫描（TLLM-ATTN-SPLITKV PR-D，schema v2）：
+./build/tiny_llm_kernel_bench --dpa-bench --num-splits 1,2,4,8,16 \
+  --warmup 20 --reps 1000 --batch 100 --repeats 3 --clock-warmup 4 \
+  --out /tmp/splitkv.raw.jsonl
+# --num-splits 逗号分隔，取值 1..32；num_splits=1 走 split-KV 入口且逐位
+# 等价单遍（anchor），>1 按 2e-3 容差比对。v1 字段保留兼容。
+# 结果归档见 results/2026-09-15-rtx5070ti-splitkv.md。
 ```
 
 测量对象为 decode 路径真实 shape（Qwen2.5-0.5B）：W8A16 GEMM（M=1, K=896,
@@ -168,3 +186,14 @@ N∈{128,896,4864} 与 down M=1,K=4864,N=896）、FP16 lm_head（M=1,K=896,
 N=151936）、attention_decode（S∈{8,32,64,128}）、rmsnorm、RoPE、add、
 silu_mul。C1 起该工具测量的是 M==1 转置快路径（与推理引擎 decode 一致的
 公开接口）。
+
+### profiler 可用性（2026-09-14 复核，推翻上表结论的一部分）
+
+| 工具 | 2026-08-23（驱动 610.88 / ncu 2022.4.1） | 2026-09-14（驱动 615.65.06 / ncu 2026.2.1.0） |
+|------|------------------------------------------|-----------------------------------------------|
+| `ncu` | `ERR_NVGPUCTRPERM`，无指标 | **可用**，可收集 `gpu__time_duration.sum`、`dram__bytes.sum`、`lts__t_bytes.sum`、`l1tex__t_bytes.sum`、`sm__throughput.*`、`smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct` |
+| `nsys` | 可生成 `.qdstrm`，缺 importer | 未复核 |
+
+注意：`dram__bytes_read.sum` 在 2026-09-14 的驱动上返回 `n/a`，改用 `dram__bytes.sum`。
+ncu 会 replay kernel，绝对时长高于墙钟，**只可比值，不可与 `--dpa-bench` 的墙钟数混用**。
+
