@@ -234,6 +234,41 @@ optional device `decode_len` (decode-only; `nullptr` for prefill).
   so a corrupt block table can no longer cause illegal-address faults that
   poison the whole CUDA context.
 
+### Decode attention dispatch (paged path)
+
+The paged decode step supports two addressing strategies behind the
+`TLLM_PAGED_ATTENTION` environment switch (`auto | legacy | direct`,
+case-insensitive; unparsable values fail loudly):
+
+- `legacy` (default): gather the visible window to contiguous scratch via
+  `paged_gather_blocks`, then run `attention_decode`.
+- `direct` / `auto` (equivalent today): `attention_decode_paged` reads K/V
+  directly from the pool through the block table and skips both gathers.
+  Visible length travels as a device `int`, so the launch path stays
+  CUDA-Graph-capturable.
+
+`direct` is **bitwise-identical** to `legacy` at kernel, layer, and C-ABI
+levels (`tests/test_paged_direct.cpp`, `tests/test_paged_dispatch.cpp`,
+`tests/test_ffi_paged_dispatch.cpp`). Performance is context-dependent:
+the archived three-way kernel benchmark
+([2026-09-14-rtx5070ti-dpa](../performance/results/2026-09-14-rtx5070ti-dpa.md))
+showed `direct` faster only at `visible_tokens <= 128` and slower at long
+windows (up to ~15% at S=2048), so the default remains `legacy` — the
+§10/§11 default flip was explicitly not triggered.
+
+An optional split-KV decode (`TLLM_ATTN_SPLITKV = 2..32`, default off)
+partitions the visible window across blocks and combines partials; it applies
+to both `legacy` (post-gather) and `direct` addressing. The archived sweep
+([2026-09-15-rtx5070ti-splitkv](../performance/results/2026-09-15-rtx5070ti-splitkv.md))
+measured `direct_splitkv@16` ~6x faster than single-pass `direct` at
+`visible=2048` but up to ~1.9x slower at `visible <= 129` (fixed combine
+overhead), and there is no host-side adaptive trigger, so it stays opt-in.
+
+All numbers above are **kernel-level** evidence only; no serving-level
+TTFT/TPOT claim is made. The FFI-level equivalence gate
+(`tests/test_ffi_paged_dispatch.cpp`) covers `legacy`/`direct`/`auto`/
+split-KV through `tinyllm_step` on a synthetic GGUF.
+
 ### C ABI integration
 
 The paged pool is allocated inside `ffi.cpp` (`paged_k_pool` / `paged_v_pool`

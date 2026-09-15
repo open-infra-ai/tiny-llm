@@ -122,7 +122,12 @@ void LayerWorkspace::allocate(const ModelConfig &config) {
         CUDA_CHECK(cudaMalloc(&ffn_up, ffn_size * sizeof(half)));
         CUDA_CHECK(cudaMalloc(&ffn_output, hidden_size * sizeof(half)));
 
-        // EXPERIMENT: attn_partial allocation disabled
+        // split-KV partial：按 kAttnMaxSplits 上界一次性分配（运行时改值不越界），
+        // kernel 内部零分配。缺失此分配时 splitkv 入口的 nullptr 防御检查会静默
+        // 返回，attn_buf 残留陈旧数据——FFI 级差分测试会暴露为 logit 漂移。
+        CUDA_CHECK(cudaMalloc(&attn_partial, static_cast<size_t>(config.num_heads) *
+                                                 kAttnMaxSplits * (2 + config.head_dim) *
+                                                 sizeof(float)));
     } catch (...) {
         // 修复：中途任一 cudaMalloc 失败时释放已分配指针再重抛。allocated
         // 尚未置位，析构路径的 free() 会因早退检查跳过，必须在此手动清理，
