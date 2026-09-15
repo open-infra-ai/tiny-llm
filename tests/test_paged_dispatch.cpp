@@ -136,6 +136,9 @@ void freeQuantizedWeight(QuantizedWeight &qw) {
 }
 
 constexpr float kSentinel = 7.0f;
+// split-KV partial 工作区的哨兵：与 kSentinel 区分开，避免"恰好算出 7.0"
+// 的误报（partial 是 fp32，可以用 fp16 不能精确表示的值）。
+constexpr float kPartialSentinel = -12345.25f;
 
 } // namespace
 
@@ -330,6 +333,48 @@ class PagedDispatchTest : public ::testing::Test {
             if (__half2float(h) != kSentinel) return false;
         for (half h : v)
             if (__half2float(h) != kSentinel) return false;
+        return true;
+    }
+
+    // split-KV 的"kernel 真的跑过"探针，与 poisonScratch 同构：
+    // partial 工作区（kernel 第一阶段的唯一输出）与 attn_buf（combine 的
+    // 唯一输出）先写成哨兵。若 splitkv 入口因 partial_workspace == nullptr
+    // 静默 return，两处都保留哨兵——把"两条路径同样空转"的平凡相等变成
+    // 显式失败。
+    static void poisonSplitKvTargets(Fixture &f) {
+        const size_t n_partial =
+            static_cast<size_t>(f.config.num_heads) * kAttnMaxSplits * (2 + f.config.head_dim);
+        std::vector<float> sp(n_partial, kPartialSentinel);
+        ASSERT_NE(f.ws.attn_partial, nullptr) << "LayerWorkspace 必须分配 attn_partial（生产契约）";
+        CUDA_CHECK(cudaMemcpy(f.ws.attn_partial, sp.data(), n_partial * sizeof(float),
+                              cudaMemcpyHostToDevice));
+        // combine 对单 token decode 写 attn_buf 的前 num_heads*head_dim 个 half
+        std::vector<half> sb(static_cast<size_t>(f.config.num_heads) * f.config.head_dim,
+                             __float2half(kSentinel));
+        CUDA_CHECK(
+            cudaMemcpy(f.ws.attn_buf, sb.data(), sb.size() * sizeof(half), cudaMemcpyHostToDevice));
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    }
+
+    // num_splits 实际使用的槽位（num_heads*num_splits*stride 个 float）
+    // 必须全部被覆写；>num_splits 的槽位保留哨兵属正常。
+    static bool partialSlotsWritten(Fixture &f, int num_splits) {
+        const int          stride = 2 + f.config.head_dim;
+        const size_t       used = static_cast<size_t>(f.config.num_heads) * num_splits * stride;
+        std::vector<float> p(used);
+        CUDA_CHECK(
+            cudaMemcpy(p.data(), f.ws.attn_partial, used * sizeof(float), cudaMemcpyDeviceToHost));
+        for (float v : p)
+            if (v == kPartialSentinel) return false;
+        return true;
+    }
+
+    static bool attnBufWritten(Fixture &f) {
+        const size_t      n = static_cast<size_t>(f.config.num_heads) * f.config.head_dim;
+        std::vector<half> b(n);
+        CUDA_CHECK(cudaMemcpy(b.data(), f.ws.attn_buf, n * sizeof(half), cudaMemcpyDeviceToHost));
+        for (half v : b)
+            if (__half2float(v) == kSentinel) return false;
         return true;
     }
 
@@ -583,14 +628,36 @@ TEST_F(PagedDispatchTest, SplitKvChangesNumericsOnlySlightlyVersusSinglePass) {
     const auto single = decode("1");
     const auto split4 = decode("4");
 
+    // 收紧到 kernel 级门禁同量级（benchmark 等价记录实测 max|diff| ≈ 6e-5）：
+    // 此前的 5% 相对容差宽到能吸收"splitkv 空转、attn_buf 残留陈旧数据"的
+    // 差异（master 上 attn_partial 未分配时该用例照样绿）。
     const float diff = maxAbsDiff(single, split4);
-    float       scale = 0.0f;
-    for (half h : single)
-        scale = std::max(scale, std::fabs(__half2float(h)));
+    EXPECT_LT(diff, 2e-3f) << "split 与单遍的差异超出归约序噪声范围，疑似路由接错";
+}
 
-    ASSERT_GT(scale, 0.0f) << "参考输出不应恒为 0";
-    EXPECT_LT(diff / scale, 5e-2f)
-        << "split 与单遍的差异相对尺度过大，疑似路由接错：max|diff|=" << diff << " scale=" << scale;
+// 反"平凡相等"门禁：先毒化 partial 工作区与 attn_buf，再断言两条 splitkv
+// 入口都**真的执行**了 kernel（全部已用槽位被覆写）。两条入口对
+// partial_workspace == nullptr 均静默 return——若它们空转，本用例失败，
+// 而 SplitKvLegacyAndDirectAgreeBitwiseAtSameSplits 仍会"逐位相等"地绿。
+TEST_F(PagedDispatchTest, SplitKvEntryActuallyWritesPartials) {
+    for (const char *mode : {"legacy", "direct"}) {
+        for (const char *splits : {"2", "4"}) {
+            SCOPED_TRACE(std::string("mode=") + mode + " num_splits=" + splits);
+            ScopedEnv mode_env("TLLM_PAGED_ATTENTION", mode);
+            ScopedEnv split_env("TLLM_ATTN_SPLITKV", splits);
+
+            Fixture f;
+            buildFixture(f);
+            poisonSplitKvTargets(f);
+            runDecode(f, f.hidden_a, 0);
+
+            const int ns = std::atoi(splits);
+            EXPECT_TRUE(partialSlotsWritten(f, ns))
+                << "splitkv kernel 未覆写 partial 槽位——疑似静默 return";
+            EXPECT_TRUE(attnBufWritten(f)) << "combine kernel 未覆写 attn_buf——疑似静默 return";
+            freeModel(f);
+        }
+    }
 }
 
 // prefill 与开关无关：即使 TLLM_ATTN_SPLITKV > 1，prefill 输出也必须逐位不变。
