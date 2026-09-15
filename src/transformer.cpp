@@ -8,10 +8,69 @@
 #include "tiny_llm/logger.h"
 #include "tiny_llm/validator.h"
 #include "w8a16_matmul.cuh"
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
+#include <string>
 
 namespace tiny_llm {
+
+namespace {
+
+// ── 分页 decode 的 runtime dispatch 开关（TLLM-P0-004 PR-3）──────────────────
+//
+// TLLM_PAGED_ATTENTION = auto | legacy | direct（大小写不敏感）：
+//   legacy —— decode 走 gather + 连续 attention（历史路径）
+//   direct —— decode 直接按 pool + block table 寻址（attention_decode_paged）
+//   auto   —— 当前等价于 direct。设计包 §7（Q8）已取消"按几何自动回落"那条分支：
+//             它不可达也不可测（smem 上限需要 head_dim > 7800 才触发）。保留该取值
+//             是为了将来出现真实可达的支持边界时不必改调用方。
+//
+// 默认（未设置）= legacy：设计包 §11 规定先默认 legacy，PR-5 的三路 benchmark 通过后
+// 再改 auto。**因此本 PR 不改变生产默认行为。**
+//
+// 不做进程级缓存：每次调用解析（约 20 ns，无堆分配），使 setenv 在测试中即时生效，
+// 无需为测试暴露 reset seam。该解析只在 paged 路径上执行。
+enum class PagedAttentionMode { Legacy, Direct };
+
+bool asciiIEquals(const char *a, const char *b) {
+    while (*a != '\0' && *b != '\0') {
+        const char ca = (*a >= 'A' && *a <= 'Z') ? static_cast<char>(*a - 'A' + 'a') : *a;
+        const char cb = (*b >= 'A' && *b <= 'Z') ? static_cast<char>(*b - 'A' + 'a') : *b;
+        if (ca != cb) return false;
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
+// 显式选择 legacy 时提示一次，使 benchmark / 结果包能区分"到底跑了哪条路"。
+void warnLegacyOnce() {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true)) {
+        TLLM_WARN("TLLM_PAGED_ATTENTION=legacy: decode 走 legacy gather 路径（direct 被显式关闭）");
+    }
+}
+
+// 未识别取值显式失败，不静默回退（G5：不得吞掉配置错误）。
+Result<PagedAttentionMode> resolvePagedAttentionMode() {
+    const char *raw = std::getenv("TLLM_PAGED_ATTENTION");
+    if (raw == nullptr || *raw == '\0') {
+        return Result<PagedAttentionMode>::ok(PagedAttentionMode::Legacy);
+    }
+    if (asciiIEquals(raw, "legacy")) {
+        warnLegacyOnce();
+        return Result<PagedAttentionMode>::ok(PagedAttentionMode::Legacy);
+    }
+    if (asciiIEquals(raw, "direct") || asciiIEquals(raw, "auto")) {
+        return Result<PagedAttentionMode>::ok(PagedAttentionMode::Direct);
+    }
+    return Result<PagedAttentionMode>::err("TLLM_PAGED_ATTENTION: unrecognized value \"" +
+                                           std::string(raw) +
+                                           "\" (expected auto | legacy | direct)");
+}
+
+} // namespace
 
 void LayerWorkspace::allocate(const ModelConfig &config) {
     if (allocated) return;
@@ -400,22 +459,40 @@ Result<void> TransformerLayer::attentionPaged(const half *x, half *output,
     const bool is_decode = (num_tokens == 1 && kv.decode_len != nullptr);
     const int  visible = is_decode ? (kv.position + 1) : num_tokens;
 
-    // 把可见区间 gather 到 scratch（连续布局供 attention kernel 使用）
-    kernels::paged_gather_blocks(kv.k_scratch, k_pool_layer, kv.block_table, visible, kv.block_size,
-                                 kv_dim, kv.max_num_blocks, stream);
-    kernels::paged_gather_blocks(kv.v_scratch, v_pool_layer, kv.block_table, visible, kv.block_size,
-                                 kv_dim, kv.max_num_blocks, stream);
+    // decode 的取址策略由 TLLM_PAGED_ATTENTION 决定；非法取值在入口显式失败，
+    // 不静默回退。prefill 一律保留 legacy 路径（设计包 §1 non-goals）。
+    const auto mode_result = resolvePagedAttentionMode();
+    if (mode_result.isErr()) {
+        TLLM_ERROR("attentionPaged: {}", mode_result.error());
+        return Result<void>::err(mode_result.error());
+    }
+    const bool use_direct = is_decode && mode_result.value() == PagedAttentionMode::Direct;
 
     // Attention
     float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-    if (is_decode) {
-        // decode：单 query 对已 gather 的可见 K/V；可见长度由 device int 提供
-        kernels::attention_decode(ws_->q_buf, kv.k_scratch, kv.v_scratch, ws_->attn_buf, scale,
-                                  num_heads, num_kv_heads, kv.decode_len, head_dim, stream);
+    if (use_direct) {
+        // direct：直接从物理 pool + block table 寻址，跳过 gather。可见长度走 device
+        // int（CUDA Graph 可捕获）；块表长度用 visible_blocks，forwardPaged 已校验其
+        // 足以覆盖可见 token。
+        kernels::attention_decode_paged(ws_->q_buf, k_pool_layer, v_pool_layer, kv.block_table,
+                                        ws_->attn_buf, scale, num_heads, num_kv_heads, head_dim,
+                                        kv.decode_len, kv.block_size, kv.max_num_blocks,
+                                        kv.visible_blocks, stream);
     } else {
-        // prefill：因果掩码全量注意力（gather 回读与 scatter 内容一致）
-        kernels::attention_prefill(ws_->q_buf, kv.k_scratch, kv.v_scratch, ws_->attn_buf, scale,
-                                   num_heads, num_kv_heads, num_tokens, head_dim, stream);
+        // legacy：把可见区间 gather 到 scratch（连续布局），供连续 attention 使用。
+        kernels::paged_gather_blocks(kv.k_scratch, k_pool_layer, kv.block_table, visible,
+                                     kv.block_size, kv_dim, kv.max_num_blocks, stream);
+        kernels::paged_gather_blocks(kv.v_scratch, v_pool_layer, kv.block_table, visible,
+                                     kv.block_size, kv_dim, kv.max_num_blocks, stream);
+        if (is_decode) {
+            // decode：单 query 对已 gather 的可见 K/V；可见长度由 device int 提供
+            kernels::attention_decode(ws_->q_buf, kv.k_scratch, kv.v_scratch, ws_->attn_buf, scale,
+                                      num_heads, num_kv_heads, kv.decode_len, head_dim, stream);
+        } else {
+            // prefill：因果掩码全量注意力（gather 回读与 scatter 内容一致）
+            kernels::attention_prefill(ws_->q_buf, kv.k_scratch, kv.v_scratch, ws_->attn_buf, scale,
+                                       num_heads, num_kv_heads, num_tokens, head_dim, stream);
+        }
     }
 
     // Output projection
