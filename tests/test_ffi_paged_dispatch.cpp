@@ -20,6 +20,7 @@
 #include "tiny_llm/ffi.h"
 
 #include <cuda_fp16.h>
+#include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -36,6 +37,18 @@
 #include <vector>
 
 namespace {
+
+bool hasCudaDevice() {
+    static bool checked = false;
+    static bool has_device = false;
+    if (!checked) {
+        int         n = 0;
+        cudaError_t e = cudaGetDeviceCount(&n);
+        has_device = (e == cudaSuccess && n > 0);
+        checked = true;
+    }
+    return has_device;
+}
 
 // ── 合成 GGUF 构造 ─────────────────────────────────────────────
 // 几何：hidden=128, layers=2, heads=4(GQA kv=2), head_dim=32,
@@ -380,6 +393,7 @@ SeqOut runPagedSeq(TinyLlmHandle *h, int lp_k) {
 class FfiPagedDispatchTest : public ::testing::Test {
   protected:
     void SetUp() override {
+        if (!hasCudaDevice()) GTEST_SKIP() << "No CUDA device available";
         // 每个用例重写（TearDown 会删除），内容确定，路径按 pid 区分
         model_path_ = writeTempFile(syntheticModelGguf(), "model");
     }
