@@ -663,8 +663,8 @@ TEST_F(PagedOracleLayerTest, ForwardPagedKVMatchesContiguousKVPerLayer) {
     for (int step = 0; step < kSteps; ++step) {
         const int pos = kPrompt + step;
         const int vis = pos + 1;
-        d_decode_len.copyFromHost(&vis, 0);
-        d_pos.copyFromHost(&pos, 0);
+        d_decode_len.copyFromHost(&vis, 1);
+        d_pos.copyFromHost(&pos, 1);
 
         cache->setAppendPos(pos, 0);
         for (auto &layer : model.layers) {
