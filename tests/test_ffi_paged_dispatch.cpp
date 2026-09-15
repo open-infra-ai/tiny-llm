@@ -329,6 +329,9 @@ SeqOut runPagedSeq(TinyLlmHandle *h, int lp_k) {
         std::map<int, float> m;
         for (int i = 0; i < lp_k; ++i) {
             const int id = static_cast<int>(lp[2 * i]);
+            // top.size() < k 时 ABI 写哨兵 (id=-1, logprob=0)——不过滤会当成
+            // prob=1.0 的伪条目，且只在 prob 恰好下溢为 0 的一侧出现。
+            if (id < 0) continue;
             m[id] = std::exp(static_cast<double>(lp[2 * i + 1]));
         }
         out.probs.push_back(std::move(m));

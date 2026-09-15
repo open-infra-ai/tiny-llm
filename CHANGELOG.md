@@ -91,12 +91,14 @@ All notable tracked releases of Tiny-LLM are recorded here.
   合成模型（F16 tensor、2 层 qwen2 小几何、确定性权重），走完整的
   `tinyllm_load` → `allocate_sequence` → `step`（prefill+decode）→ `free_sequence`。
   断言分级与 kernel/layer 门禁口径一致：`legacy`/`direct`/`auto`/`splitkv=1`
-  之间逐位等价（逐步 token id 严格相等）；`splitkv>1` 容忍 fp32 归约序差异，
-  改为逐步比较完整输出概率分布（|Δprob| ≤ 0.02）；decode 固定喂 token 使单步
-  argmax 翻转不会级联污染后续比较。另覆盖：策略 2（`max_num_blocks == 0`）
-  不受开关影响；块表不足返回 `TLLM_ERR` 且序列保持可用；非法
-  `TLLM_ATTN_SPLITKV` 取值干净失败且句柄可恢复。该门禁落地即捕获上方
-  `attn_partial` 未分配的生产缺陷。
+  之间逐位等价（逐步 token id 严格相等，且逐步概率分布在容差 0 下逐位相同）；
+  `splitkv>1` 容忍 fp32 归约序差异，改为逐步比较完整输出概率分布
+  （|Δprob| ≤ 0.02，direct 与 legacy 两条 splitkv 入口都覆盖）；decode 固定喂
+  token 使单步 argmax 翻转不会级联污染后续比较，块表随可见窗口在 decode
+  中途增长（第 17 步跨进第 5 块）；概率比较显式拒绝 NaN 并过滤 top-k 哨兵。
+  另覆盖：策略 2（`max_num_blocks == 0`）不受开关影响；块表不足返回
+  `TLLM_ERR` 且序列保持可用；非法 `TLLM_ATTN_SPLITKV` 取值干净失败且句柄
+  可恢复。该门禁落地即捕获上方 `attn_partial` 未分配的生产缺陷。
 - TLLM-P0-004 dispatch（8 项，`tests/test_paged_dispatch.cpp`）：用"共享 scratch 是否被
   写入"直接观测路由结果——legacy 必须 gather（scratch 被覆写），direct 必须不碰
   scratch；覆盖默认值=legacy、`auto`/`direct`、大小写不敏感、非法取值显式失败、
