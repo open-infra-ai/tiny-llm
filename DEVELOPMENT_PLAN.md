@@ -94,7 +94,7 @@ export TLLM_GGUF_TEST_MODEL=/path/to/qwen2.5-0.5b-instruct-q4_k_m.gguf
   4.1 失败路径审计与测试（损坏文件 / OOM / 超长输入）
   4.2 GQA/MQA 第二个真实模型验证
   4.3 FFI 执行路径一致性收口（低风险重构）
-  4.4 与 paged-infer 对接 ✅（ABI v2 + 分页 KV 策略 1 已启用，见 ROADMAP/README）
+  4.4 与 paged-serving 对接 ✅（ABI v2 + 分页 KV 策略 1 已启用，见 ROADMAP/README）
 
 完成定义：见第 7 节 checklist。
 ```
@@ -582,11 +582,11 @@ void computeLogitsFromHidden(const half *hidden, const ModelWeights &weights,
 
 **验收**：`./build/tiny_llm_tests --gtest_filter='*FFI*:*Integration*'` 全绿。
 
-### 任务 4.4 与 paged-infer 对接 ✅（2026-08-18，Batch D）
+### 任务 4.4 与 paged-serving 对接 ✅（2026-08-18，Batch D）
 
 已完成：C ABI 升级到 ABI v2（`TinyLlmConfig` 9 int + `tinyllm_step` 增加
 `num_blocks`）；实现分页 KV（策略 1：block_tables + scatter/gather 池）与
-连续 KV（策略 2）双路径；策略 1/2 真模型差分逐 token 一致；paged-infer 默认
+连续 KV（策略 2）双路径；策略 1/2 真模型差分逐 token 一致；paged-serving 默认
 走策略 1，`PAGED_INFER_TINY_LLM_STRATEGY=2` 可回退。3 并发端到端与 llama.cpp
 greedy 逐 token 对齐。Rust 侧启用 `tiny-llm` feature + build.rs 链接
 `libtiny_llm.a` 已就绪。
@@ -626,7 +626,7 @@ greedy 逐 token 对齐。Rust 侧启用 `tiny-llm` feature + build.rs 链接
 
 - **不要**“顺手重构” `tokenizer`、`gguf_parser`、`quantization` 反量化部分：
   它们已有权威参考差分验证，改动收益为负。
-- **不要**改变 KV Cache 内存布局或 C ABI 字段顺序：`paged-infer` 的 Rust
+- **不要**改变 KV Cache 内存布局或 C ABI 字段顺序：`paged-serving` 的 Rust
   侧有布局守卫测试。
 - **不要**在任务 3 之前修改 `attention_decode` 的语义（除 3.1 明确要求外）。
 - **不要**把 benchmark 数字写进文档却没有记录硬件/commit/命令。
@@ -650,4 +650,4 @@ greedy 逐 token 对齐。Rust 侧启用 `tiny-llm` feature + build.rs 链接
 | 4.1 | 失败路径审计 | P1 | 无 | 3 个测试文件 |
 | 4.2 | 第二模型 GQA/MQA 验证 | P1 | 模型 | 测试 + README |
 | 4.3 | FFI 一致性收口 | P1 | 1.1 | 新 helper + 2 调用点 |
-| 4.4 | paged-infer 对接 | P2 | 外部仓库 | CMake install + Rust |
+| 4.4 | paged-serving 对接 | P2 | 外部仓库 | CMake install + Rust |
