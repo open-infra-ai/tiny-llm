@@ -59,6 +59,18 @@ def path_statistics(per_repeat):
     }
 
 
+def validate_correctness(bitwise, diff, tolerance, label):
+    if (
+        type(bitwise) is not bool
+        or type(diff) not in (int, float)
+        or not math.isfinite(diff)
+        or not 0 <= diff <= tolerance
+        or (bitwise and diff != 0)
+        or (tolerance == 0 and not bitwise)
+    ):
+        raise ValueError(f"{label}: correctness failed (invalid or contradictory record)")
+
+
 def summarize(records):
     records = list(records)
     counts = Counter(record["type"] for record in records)
@@ -142,18 +154,28 @@ def summarize(records):
     if set(samples) != expected or set(logged_stats) != expected:
         raise ValueError("sample/path_stats coverage does not match declared paths")
     for key, record in equivalence.items():
-        if not (
-            record["legacy_vs_direct_bitwise_equal"]
-            and record["legacy_vs_contiguous_bitwise_equal"]
-        ):
+        validate_correctness(
+            record["legacy_vs_direct_bitwise_equal"],
+            record["legacy_vs_direct_max_abs_diff"],
+            0,
+            f"single-pass {key}",
+        )
+        if record["legacy_vs_contiguous_bitwise_equal"] is not True:
             raise ValueError(f"single-pass correctness failed: {key}")
         completed = logged_shapes[key]
-        if not completed["equiv_bitwise"] or not completed.get("equiv_ok", True):
+        if (
+            completed["equiv_bitwise"] is not True
+            or completed.get("equiv_ok", True) is not True
+        ):
             raise ValueError(f"completed shape reports correctness failure: {key}")
     for key, record in split_equivalence.items():
-        diff = record["max_abs_diff"]
-        valid = record["bitwise_equal"] if key[-1] == 1 else 0 <= diff <= 2e-3
-        if not math.isfinite(diff) or not record["within_tolerance"] or not valid:
+        validate_correctness(
+            record["bitwise_equal"],
+            record["max_abs_diff"],
+            0 if key[-1] == 1 else 2e-3,
+            f"split-KV {key}",
+        )
+        if record["within_tolerance"] is not True:
             raise ValueError(f"split-KV correctness failed: {key}")
 
     computed = {}

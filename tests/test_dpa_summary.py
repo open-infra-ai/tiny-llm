@@ -80,6 +80,68 @@ class DpaSummaryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "logged median_ms disagrees"):
             summarize(records)
 
+    def test_single_pass_bitwise_diff_must_be_zero(self):
+        for diff in (1.0, -1.0, math.inf, math.nan, "0", False):
+            with self.subTest(diff=diff):
+                records = copy.deepcopy(self.v1)
+                next(r for r in records if r["type"] == "equivalence")[
+                    "legacy_vs_direct_max_abs_diff"
+                ] = diff
+                with self.assertRaisesRegex(ValueError, "correctness"):
+                    summarize(records)
+
+    def test_correctness_flags_must_be_json_booleans(self):
+        for kind, field in (
+            ("equivalence", "legacy_vs_direct_bitwise_equal"),
+            ("equivalence", "legacy_vs_contiguous_bitwise_equal"),
+            ("equivalence_splitkv", "bitwise_equal"),
+            ("equivalence_splitkv", "within_tolerance"),
+            ("shape_summary", "equiv_bitwise"),
+            ("shape_summary", "equiv_ok"),
+        ):
+            for flag in ("false", "true", 1, None):
+                with self.subTest(kind=kind, field=field, flag=flag):
+                    records = copy.deepcopy(self.v2)
+                    next(r for r in records if r["type"] == kind)[field] = flag
+                    with self.assertRaisesRegex(ValueError, "correctness"):
+                        summarize(records)
+
+    def test_splitkv_bitwise_diff_must_be_zero(self):
+        for splits in (1, 2):
+            with self.subTest(splits=splits):
+                records = copy.deepcopy(self.v2)
+                record = next(
+                    r for r in records
+                    if r["type"] == "equivalence_splitkv" and r["num_splits"] == splits
+                )
+                record["bitwise_equal"] = True
+                record["max_abs_diff"] = 0.001
+                with self.assertRaisesRegex(ValueError, "correctness"):
+                    summarize(records)
+
+    def test_splitkv_diff_must_be_finite_nonnegative_number(self):
+        for diff in (-0.001, math.inf, math.nan, "0", False):
+            with self.subTest(diff=diff):
+                records = copy.deepcopy(self.v2)
+                record = next(
+                    r for r in records
+                    if r["type"] == "equivalence_splitkv" and r["num_splits"] == 2
+                )
+                record["bitwise_equal"] = False
+                record["max_abs_diff"] = diff
+                with self.assertRaisesRegex(ValueError, "correctness"):
+                    summarize(records)
+
+    def test_splitkv_nonbitwise_result_within_tolerance_is_valid(self):
+        records = copy.deepcopy(self.v2)
+        record = next(
+            r for r in records
+            if r["type"] == "equivalence_splitkv" and r["num_splits"] == 2
+        )
+        record["bitwise_equal"] = False
+        record["max_abs_diff"] = 0.002
+        self.assertEqual(summarize(records)["equivalence"]["failures"], 0)
+
     def test_duplicate_correctness_record_is_rejected(self):
         records = list(self.v1)
         records.append(
