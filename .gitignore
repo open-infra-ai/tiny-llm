@@ -85,6 +85,8 @@ coverage/
 
 # Cache directories
 .cache/
+__pycache__/
+*.py[cod]
 
 # Profiling data
 *.prof

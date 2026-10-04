@@ -23,6 +23,13 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  evidence-summary:
+    name: Recompute archived DPA evidence (CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tests -p test_dpa_summary.py -v
+
   format:
     name: Format
     runs-on: ubuntu-latest
