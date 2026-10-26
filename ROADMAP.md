@@ -41,6 +41,9 @@
       缺失），改用仓库内微基准 `tiny_llm_kernel_bench`（C0）作为替代证据
 - [x] 将实测数字回填 docs/performance/（附硬件/软件版本/复现命令）
       —— 见 `docs/performance/results/2026-08-18-decode-optimization.md`
+- [x] ncu 逐 kernel 剖析（2026-10-26）—— ncu 恢复可用，产出 decode kernel
+      占比与利用率；nsys importer 仍缺失。见
+      `docs/performance/results/2026-10-26-ncu-decode-profile.md`
 
 **当前证据**：clean commit `565da79` 的 schema v2 五组配对 A/B 中，CUDA Graph
 使 TPOT 跨进程中位数 8.322 → **5.225 ms/token**（-37.2%），decode 吞吐
@@ -70,7 +73,8 @@
 
 - [x] GQA 真实模型验证：Qwen2.5-0.5B **14→2** 端到端；kernel 级另验 Llama-3.2 风格
       **32→8** 与 **MQA 16→1**（`tests/test_kernels.cu`）
-- [ ] 第二个真实 GGUF 端到端门控（设 `TLLM_GGUF_TEST_MODEL_2`，如 Llama-3.2-1B）
+- [x] 第二个真实 GGUF 端到端门控（`TLLM_GGUF_TEST_MODEL_2`，SmolLM2-360M-Instruct
+      Q8_0，GQA 15→5，2026-10-26；见 `docs/performance/results/2026-10-26-gpu-gate.md`）
 - [ ] 长上下文 KV Cache 显存实测曲线
 - [ ] 失败路径审计：加载损坏文件、显存不足、超长输入的行为与测试
 - [x] 导出 C ABI（`ffi.h`/`ffi.cpp`：`tinyllm_load` / `tinyllm_step` / `tinyllm_allocate_sequence`

@@ -1,0 +1,534 @@
+# tiny-llm GPU correctness gate
+date: 2026-10-26T07:46:58Z
+commit: cdff4e67d384049ba528d14ea139f8e82268c43c
+tracked_dirty_paths: 1
+gpu: NVIDIA GeForce RTX 3060 Laptop GPU, 610.88, 6144 MiB, 8.6
+nvcc: Build cuda_12.0.r12.0/compiler.32267302_0
+model: qwen2.5-0.5b-instruct-q4_k_m.gguf (491400032 bytes, sha256 74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db)
+model2: smollm2-360m-instruct-q8_0.gguf (386404992 bytes, sha256 48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201)
+
+-- Build spdlog: 1.12.0
+-- Build type: Release
+-- Configuring done (0.8s)
+-- Generating done (0.0s)
+-- Build files have been written to: <repo>/build
+[  3%] Built target gtest
+[ 15%] Built target spdlog
+[ 20%] Built target gtest_main
+[ 21%] Built target gmock
+[ 30%] Built target gmock_main
+[ 56%] Built target tiny_llm
+[ 66%] Built target tiny_llm_bench
+[ 66%] Built target tiny_llm_kernel_bench
+[ 66%] Built target tiny_llm_demo
+[100%] Built target tiny_llm_tests
+Internal ctest changing into directory: <repo>/build
+Test project <repo>/build
+        Start   1: SplitKvTest.NumSplitsOneIsBitwiseIdenticalToSinglePassContiguous
+  1/252 Test   #1: SplitKvTest.NumSplitsOneIsBitwiseIdenticalToSinglePassContiguous ............   Passed    0.41 sec
+        Start   2: SplitKvTest.NumSplitsOneIsBitwiseIdenticalToSinglePassPaged
+  2/252 Test   #2: SplitKvTest.NumSplitsOneIsBitwiseIdenticalToSinglePassPaged .................   Passed    0.35 sec
+        Start   3: SplitKvTest.SplitMatchesIndependentOracle
+  3/252 Test   #3: SplitKvTest.SplitMatchesIndependentOracle ...................................   Passed    0.44 sec
+        Start   4: SplitKvTest.SplitContiguousAndPagedAgreeBitwise
+  4/252 Test   #4: SplitKvTest.SplitContiguousAndPagedAgreeBitwise .............................   Passed    0.36 sec
+        Start   5: SplitKvTest.EmptyVisibleWindowIsAllZero
+  5/252 Test   #5: SplitKvTest.EmptyVisibleWindowIsAllZero .....................................   Passed    0.35 sec
+        Start   6: SplitKvTest.VisibleSmallerThanSplitsHasNeutralEmptySplits
+  6/252 Test   #6: SplitKvTest.VisibleSmallerThanSplitsHasNeutralEmptySplits ...................   Passed    0.34 sec
+        Start   7: SplitKvTest.VisibleNotMultipleOfSplitsIsCorrect
+  7/252 Test   #7: SplitKvTest.VisibleNotMultipleOfSplitsIsCorrect .............................   Passed    0.39 sec
+        Start   8: SplitKvTest.InvalidBlockIdsFollowZeroRowSemantics
+  8/252 Test   #8: SplitKvTest.InvalidBlockIdsFollowZeroRowSemantics ...........................   Passed    0.40 sec
+        Start   9: SplitKvTest.ShortBlockTableIsGuardedWithoutFault
+  9/252 Test   #9: SplitKvTest.ShortBlockTableIsGuardedWithoutFault ............................   Passed    0.34 sec
+        Start  10: SplitKvTest.GraphReplayWithGrowingVisibleMatchesEager
+ 10/252 Test  #10: SplitKvTest.GraphReplayWithGrowingVisibleMatchesEager .......................   Passed    0.35 sec
+        Start  11: SplitKvTest.LateMaxForcesOnlineRescaleToMatter
+ 11/252 Test  #11: SplitKvTest.LateMaxForcesOnlineRescaleToMatter ..............................   Passed    0.35 sec
+        Start  12: SplitKvTest.NonDefaultStreamMatchesDefaultStream
+ 12/252 Test  #12: SplitKvTest.NonDefaultStreamMatchesDefaultStream ............................   Passed    0.35 sec
+        Start  13: ResultTest.OkResultHoldsValue
+ 13/252 Test  #13: ResultTest.OkResultHoldsValue ...............................................   Passed    0.00 sec
+        Start  14: ResultTest.ErrResultHoldsMessage
+ 14/252 Test  #14: ResultTest.ErrResultHoldsMessage ............................................   Passed    0.00 sec
+        Start  15: ResultTest.ValueOrReturnsValueOnOk
+ 15/252 Test  #15: ResultTest.ValueOrReturnsValueOnOk ..........................................   Passed    0.00 sec
+        Start  16: ResultTest.ValueOrReturnsDefaultOnErr
+ 16/252 Test  #16: ResultTest.ValueOrReturnsDefaultOnErr .......................................   Passed    0.00 sec
+        Start  17: ResultTest.AccessingValueOnErrThrows
+ 17/252 Test  #17: ResultTest.AccessingValueOnErrThrows ........................................   Passed    0.00 sec
+        Start  18: ResultTest.AccessingErrorOnOkThrows
+ 18/252 Test  #18: ResultTest.AccessingErrorOnOkThrows .........................................   Passed    0.00 sec
+        Start  19: ResultTest.MapTransformsValue
+ 19/252 Test  #19: ResultTest.MapTransformsValue ...............................................   Passed    0.00 sec
+        Start  20: ResultTest.MapPreservesError
+ 20/252 Test  #20: ResultTest.MapPreservesError ................................................   Passed    0.00 sec
+        Start  21: ResultTest.VoidResultOk
+ 21/252 Test  #21: ResultTest.VoidResultOk .....................................................   Passed    0.00 sec
+        Start  22: ResultTest.VoidResultErr
+ 22/252 Test  #22: ResultTest.VoidResultErr ....................................................   Passed    0.00 sec
+        Start  23: ResultTest.StringResult
+ 23/252 Test  #23: ResultTest.StringResult .....................................................   Passed    0.00 sec
+        Start  24: CudaExceptionTest.ExceptionContainsErrorInfo
+ 24/252 Test  #24: CudaExceptionTest.ExceptionContainsErrorInfo ................................   Passed    0.10 sec
+        Start  25: CudaCheckTest.SuccessfulCallDoesNotThrow
+ 25/252 Test  #25: CudaCheckTest.SuccessfulCallDoesNotThrow ....................................   Passed    0.35 sec
+        Start  26: CudaCheckTest.FailedCallThrowsCudaException
+ 26/252 Test  #26: CudaCheckTest.FailedCallThrowsCudaException .................................   Passed    0.38 sec
+        Start  27: DeviceBufferTest.DefaultConstructorCreatesEmptyBuffer
+ 27/252 Test  #27: DeviceBufferTest.DefaultConstructorCreatesEmptyBuffer .......................   Passed    0.11 sec
+        Start  28: DeviceBufferTest.AllocatesMemory
+ 28/252 Test  #28: DeviceBufferTest.AllocatesMemory ............................................   Passed    0.34 sec
+        Start  29: DeviceBufferTest.MoveConstructor
+ 29/252 Test  #29: DeviceBufferTest.MoveConstructor ............................................   Passed    0.34 sec
+        Start  30: DeviceBufferTest.MoveAssignment
+ 30/252 Test  #30: DeviceBufferTest.MoveAssignment .............................................   Passed    0.39 sec
+        Start  31: DeviceBufferTest.CopyFromAndToHost
+ 31/252 Test  #31: DeviceBufferTest.CopyFromAndToHost ..........................................   Passed    0.38 sec
+        Start  32: CudaStreamTest.CreatesValidStream
+ 32/252 Test  #32: CudaStreamTest.CreatesValidStream ...........................................   Passed    0.33 sec
+        Start  33: CudaStreamTest.MoveConstructor
+ 33/252 Test  #33: CudaStreamTest.MoveConstructor ..............................................   Passed    0.34 sec
+        Start  34: CudaStreamTest.Synchronize
+ 34/252 Test  #34: CudaStreamTest.Synchronize ..................................................   Passed    0.34 sec
+        Start  35: MemoryInfoTest.ReturnsValidInfo
+ 35/252 Test  #35: MemoryInfoTest.ReturnsValidInfo .............................................   Passed    0.36 sec
+        Start  36: DeviceSamplingTest.GreedyArgmaxMatchesHostBaseline
+ 36/252 Test  #36: DeviceSamplingTest.GreedyArgmaxMatchesHostBaseline ..........................   Passed    0.37 sec
+        Start  37: FFITest.LoadAllocateStepFree
+ 37/252 Test  #37: FFITest.LoadAllocateStepFree ................................................   Passed   16.76 sec
+        Start  38: FFITest.DeviceGreedyMatchesHostSampling
+ 38/252 Test  #38: FFITest.DeviceGreedyMatchesHostSampling .....................................   Passed   32.41 sec
+        Start  39: FFITest.InvalidArgsReturnError
+ 39/252 Test  #39: FFITest.InvalidArgsReturnError ..............................................   Passed    0.00 sec
+        Start  40: FFITest.BatchedLogprobsBufferContract
+ 40/252 Test  #40: FFITest.BatchedLogprobsBufferContract .......................................   Passed   17.10 sec
+        Start  41: FFITest.PagedKVStrategyMatchesContiguous
+ 41/252 Test  #41: FFITest.PagedKVStrategyMatchesContiguous ....................................   Passed   66.44 sec
+        Start  42: ExecutionCommonTest.FinalNormAndComputeLogitsMatchesTwoStep
+ 42/252 Test  #42: ExecutionCommonTest.FinalNormAndComputeLogitsMatchesTwoStep .................   Passed    0.36 sec
+        Start  43: ExecutionCommonTest.BatchFinalNormAndLogitsMatchPerRow
+ 43/252 Test  #43: ExecutionCommonTest.BatchFinalNormAndLogitsMatchPerRow ......................   Passed    0.36 sec
+        Start  44: FfiPagedDispatchTest.DirectAutoAndSplitKvMatchLegacyThroughCAbi
+ 44/252 Test  #44: FfiPagedDispatchTest.DirectAutoAndSplitKvMatchLegacyThroughCAbi .............   Passed    0.54 sec
+        Start  45: FfiPagedDispatchTest.StrategyTwoIgnoresAttentionSwitch
+ 45/252 Test  #45: FfiPagedDispatchTest.StrategyTwoIgnoresAttentionSwitch ......................   Passed    0.38 sec
+        Start  46: FfiPagedDispatchTest.ShortBlockTableFailsThenSequenceSurvives
+ 46/252 Test  #46: FfiPagedDispatchTest.ShortBlockTableFailsThenSequenceSurvives ...............   Passed    0.41 sec
+        Start  47: FfiPagedDispatchTest.InvalidSplitKvEnvFailsCleanly
+ 47/252 Test  #47: FfiPagedDispatchTest.InvalidSplitKvEnvFailsCleanly ..........................   Passed    0.38 sec
+        Start  48: GGUFParser.RejectsVersion1
+ 48/252 Test  #48: GGUFParser.RejectsVersion1 ..................................................   Passed    0.00 sec
+        Start  49: GGUFParser.HonorsGeneralAlignment
+ 49/252 Test  #49: GGUFParser.HonorsGeneralAlignment ...........................................   Passed    0.00 sec
+        Start  50: GGUFParser.RejectsNestedArray
+ 50/252 Test  #50: GGUFParser.RejectsNestedArray ...............................................   Passed    0.00 sec
+        Start  51: GGUFParser.RejectsExcessiveTensorDims
+ 51/252 Test  #51: GGUFParser.RejectsExcessiveTensorDims .......................................   Passed    0.00 sec
+        Start  52: GGUFParser.RejectsTensorOffsetOverflow
+ 52/252 Test  #52: GGUFParser.RejectsTensorOffsetOverflow ......................................   Passed    0.00 sec
+        Start  53: SecondModelTest.LoadsAndGeneratesWithDistinctGQA
+ 53/252 Test  #53: SecondModelTest.LoadsAndGeneratesWithDistinctGQA ............................   Passed   10.91 sec
+        Start  54: InferenceEngineTest.GGUFLoadFailsOnMissingFile
+ 54/252 Test  #54: InferenceEngineTest.GGUFLoadFailsOnMissingFile ..............................   Passed    0.00 sec
+        Start  55: InferenceEngineTest.GreedySamplingReturnsArgmax
+ 55/252 Test  #55: InferenceEngineTest.GreedySamplingReturnsArgmax .............................   Passed    0.00 sec
+        Start  56: InferenceEngineTest.GreedySamplingClearMaximum
+ 56/252 Test  #56: InferenceEngineTest.GreedySamplingClearMaximum ..............................   Passed    0.00 sec
+        Start  57: InferenceEngineTest.TemperatureSamplingValidIndex
+ 57/252 Test  #57: InferenceEngineTest.TemperatureSamplingValidIndex ...........................   Passed    0.00 sec
+        Start  58: InferenceEngineTest.TopKSamplingValidIndex
+ 58/252 Test  #58: InferenceEngineTest.TopKSamplingValidIndex ..................................   Passed    0.00 sec
+        Start  59: InferenceEngineTest.TopPSamplingValidIndex
+ 59/252 Test  #59: InferenceEngineTest.TopPSamplingValidIndex ..................................   Passed    0.01 sec
+        Start  60: InferenceEngineTest.LowTemperatureApproachesGreedy
+ 60/252 Test  #60: InferenceEngineTest.LowTemperatureApproachesGreedy ..........................   Passed    0.00 sec
+        Start  61: InferenceEngineTest.SamplingHandlesInvalidInputsSafely
+ 61/252 Test  #61: InferenceEngineTest.SamplingHandlesInvalidInputsSafely ......................   Passed    0.00 sec
+        Start  62: InferenceEngineTest.TopKSamplingClampsToVocabularySize
+ 62/252 Test  #62: InferenceEngineTest.TopKSamplingClampsToVocabularySize ......................   Passed    0.00 sec
+        Start  63: InferenceEngineTest.TopPSamplingClampsProbabilityRange
+ 63/252 Test  #63: InferenceEngineTest.TopPSamplingClampsProbabilityRange ......................   Passed    0.00 sec
+        Start  64: InferenceEngineTest.TemperatureSamplingClampsNonPositiveTemperature
+ 64/252 Test  #64: InferenceEngineTest.TemperatureSamplingClampsNonPositiveTemperature .........   Passed    0.00 sec
+        Start  65: InferenceEngineTest.GreedySamplingHandlesSingleTokenVocabulary
+ 65/252 Test  #65: InferenceEngineTest.GreedySamplingHandlesSingleTokenVocabulary ..............   Passed    0.00 sec
+        Start  66: InferenceEngineTest.TopKSamplingHandlesNonPositiveK
+ 66/252 Test  #66: InferenceEngineTest.TopKSamplingHandlesNonPositiveK .........................   Passed    0.00 sec
+        Start  67: InferenceEngineTest.TopPSamplingHandlesTinyPositiveProbability
+ 67/252 Test  #67: InferenceEngineTest.TopPSamplingHandlesTinyPositiveProbability ..............   Passed    0.00 sec
+        Start  68: InferenceEngineTest.TemperatureSamplingHandlesTinyPositiveTemperature
+ 68/252 Test  #68: InferenceEngineTest.TemperatureSamplingHandlesTinyPositiveTemperature .......   Passed    0.00 sec
+        Start  69: InferenceEngineTest.TopKSamplingHandlesNullInputSafely
+ 69/252 Test  #69: InferenceEngineTest.TopKSamplingHandlesNullInputSafely ......................   Passed    0.00 sec
+        Start  70: InferenceEngineTest.TopPSamplingHandlesNullInputSafely
+ 70/252 Test  #70: InferenceEngineTest.TopPSamplingHandlesNullInputSafely ......................   Passed    0.00 sec
+        Start  71: InferenceEngineTest.SamplingDoesNotReturnOutOfRangeIndexAfterClamping
+ 71/252 Test  #71: InferenceEngineTest.SamplingDoesNotReturnOutOfRangeIndexAfterClamping .......   Passed    0.00 sec
+        Start  72: InferenceEngineTest.SamplingHandlesNegativeVocabularyGracefully
+ 72/252 Test  #72: InferenceEngineTest.SamplingHandlesNegativeVocabularyGracefully .............   Passed    0.00 sec
+        Start  73: InferenceEngineTest.SamplingHandlesNegativeProbabilityGracefully
+ 73/252 Test  #73: InferenceEngineTest.SamplingHandlesNegativeProbabilityGracefully ............   Passed    0.00 sec
+        Start  74: InferenceEngineTest.SamplingHandlesHugeTemperatureGracefully
+ 74/252 Test  #74: InferenceEngineTest.SamplingHandlesHugeTemperatureGracefully ................   Passed    0.00 sec
+        Start  75: InferenceEngineTest.SamplingHandlesHugeTopPGracefully
+ 75/252 Test  #75: InferenceEngineTest.SamplingHandlesHugeTopPGracefully .......................   Passed    0.00 sec
+        Start  76: InferenceEngineTest.SamplingHandlesHugeTopKGracefully
+ 76/252 Test  #76: InferenceEngineTest.SamplingHandlesHugeTopKGracefully .......................   Passed    0.00 sec
+        Start  77: InferenceEngineTest.SamplingHandlesZeroVocabularyGracefully
+ 77/252 Test  #77: InferenceEngineTest.SamplingHandlesZeroVocabularyGracefully .................   Passed    0.00 sec
+        Start  78: InferenceEngineTest.SamplingHandlesNullInputAcrossStrategies
+ 78/252 Test  #78: InferenceEngineTest.SamplingHandlesNullInputAcrossStrategies ................   Passed    0.00 sec
+        Start  79: InferenceEngineTest.SamplingHandlesDegenerateSingleElementCases
+ 79/252 Test  #79: InferenceEngineTest.SamplingHandlesDegenerateSingleElementCases .............   Passed    0.00 sec
+        Start  80: InferenceEngineTest.SamplingHandlesLargeKOnSmallVocabulary
+ 80/252 Test  #80: InferenceEngineTest.SamplingHandlesLargeKOnSmallVocabulary ..................   Passed    0.00 sec
+        Start  81: InferenceEngineTest.SamplingHandlesExtremePBounds
+ 81/252 Test  #81: InferenceEngineTest.SamplingHandlesExtremePBounds ...........................   Passed    0.00 sec
+        Start  82: InferenceEngineTest.SamplingHandlesExtremeTemperatureBounds
+ 82/252 Test  #82: InferenceEngineTest.SamplingHandlesExtremeTemperatureBounds .................   Passed    0.00 sec
+        Start  83: InferenceEngineTest.SamplingHandlesZeroAndNegativeStrategiesGracefully
+ 83/252 Test  #83: InferenceEngineTest.SamplingHandlesZeroAndNegativeStrategiesGracefully ......   Passed    0.00 sec
+        Start  84: InferenceEngineTest.SamplingOutputsRemainBounded
+ 84/252 Test  #84: InferenceEngineTest.SamplingOutputsRemainBounded ............................   Passed    0.00 sec
+        Start  85: InferenceEngineTest.SamplingHandlesNullGreedyInputSafely
+ 85/252 Test  #85: InferenceEngineTest.SamplingHandlesNullGreedyInputSafely ....................   Passed    0.00 sec
+        Start  86: InferenceEngineTest.SamplingHandlesNullTemperatureInputSafely
+ 86/252 Test  #86: InferenceEngineTest.SamplingHandlesNullTemperatureInputSafely ...............   Passed    0.00 sec
+        Start  87: InferenceEngineTest.SamplingHandlesNullTopKInputSafely
+ 87/252 Test  #87: InferenceEngineTest.SamplingHandlesNullTopKInputSafely ......................   Passed    0.00 sec
+        Start  88: InferenceEngineTest.SamplingHandlesNullTopPInputSafely
+ 88/252 Test  #88: InferenceEngineTest.SamplingHandlesNullTopPInputSafely ......................   Passed    0.00 sec
+        Start  89: InferenceEngineTest.SamplingHandlesInvalidAllAroundGracefully
+ 89/252 Test  #89: InferenceEngineTest.SamplingHandlesInvalidAllAroundGracefully ...............   Passed    0.00 sec
+        Start  90: InferenceEngineTest.SamplingHandlesSingleValueAcrossStrategies
+ 90/252 Test  #90: InferenceEngineTest.SamplingHandlesSingleValueAcrossStrategies ..............   Passed    0.00 sec
+        Start  91: InferenceEngineTest.SamplingHandlesMinimalProbabilityCase
+ 91/252 Test  #91: InferenceEngineTest.SamplingHandlesMinimalProbabilityCase ...................   Passed    0.00 sec
+        Start  92: InferenceEngineTest.SamplingHandlesMinimalTemperatureCase
+ 92/252 Test  #92: InferenceEngineTest.SamplingHandlesMinimalTemperatureCase ...................   Passed    0.00 sec
+        Start  93: InferenceEngineTest.SamplingHandlesZeroKGracefully
+ 93/252 Test  #93: InferenceEngineTest.SamplingHandlesZeroKGracefully ..........................   Passed    0.00 sec
+        Start  94: InferenceEngineTest.SamplingHandlesNegativeKGracefully
+ 94/252 Test  #94: InferenceEngineTest.SamplingHandlesNegativeKGracefully ......................   Passed    0.00 sec
+        Start  95: InferenceEngineTest.SamplingHandlesProbabilityAboveOneGracefully
+ 95/252 Test  #95: InferenceEngineTest.SamplingHandlesProbabilityAboveOneGracefully ............   Passed    0.00 sec
+        Start  96: InferenceEngineTest.SamplingHandlesProbabilityBelowZeroGracefully
+ 96/252 Test  #96: InferenceEngineTest.SamplingHandlesProbabilityBelowZeroGracefully ...........   Passed    0.00 sec
+        Start  97: InferenceEngineTest.SamplingHandlesVeryLargeTemperatureGracefully
+ 97/252 Test  #97: InferenceEngineTest.SamplingHandlesVeryLargeTemperatureGracefully ...........   Passed    0.00 sec
+        Start  98: InferenceEngineTest.SamplingHandlesVeryNegativeTemperatureGracefully
+ 98/252 Test  #98: InferenceEngineTest.SamplingHandlesVeryNegativeTemperatureGracefully ........   Passed    0.00 sec
+        Start  99: InferenceEngineTest.SamplingHandlesNullWithPositiveVocabularyGracefully
+ 99/252 Test  #99: InferenceEngineTest.SamplingHandlesNullWithPositiveVocabularyGracefully .....   Passed    0.00 sec
+        Start 100: InferenceEngineTest.SamplingHandlesNullProbabilityStrategiesGracefully
+100/252 Test #100: InferenceEngineTest.SamplingHandlesNullProbabilityStrategiesGracefully ......   Passed    0.00 sec
+        Start 101: InferenceEngineTest.SamplingHandlesSmallVocabularyAcrossStrategies
+101/252 Test #101: InferenceEngineTest.SamplingHandlesSmallVocabularyAcrossStrategies ..........   Passed    0.00 sec
+        Start 102: InferenceEngineTest.CudaGraphsGenerateMatchesNonGraph
+102/252 Test #102: InferenceEngineTest.CudaGraphsGenerateMatchesNonGraph .......................   Passed   34.54 sec
+        Start 103: InferenceEngineTest.GenerateRejectsOverlongInput
+103/252 Test #103: InferenceEngineTest.GenerateRejectsOverlongInput ............................   Passed    0.37 sec
+        Start 104: InferenceEngineTest.TopKTopPSamplingRespectsTopK
+104/252 Test #104: InferenceEngineTest.TopKTopPSamplingRespectsTopK ............................   Passed    0.00 sec
+        Start 105: RepetitionPenaltyTest.AppliesLlamaSemantics
+105/252 Test #105: RepetitionPenaltyTest.AppliesLlamaSemantics .................................   Passed    0.00 sec
+        Start 106: RepetitionPenaltyTest.AffectsGreedySelection
+106/252 Test #106: RepetitionPenaltyTest.AffectsGreedySelection ................................   Passed    0.00 sec
+        Start 107: IntegrationTest.StreamPoolBasicUsage
+107/252 Test #107: IntegrationTest.StreamPoolBasicUsage ........................................   Passed    0.35 sec
+        Start 108: IntegrationTest.CudaEventTiming
+108/252 Test #108: IntegrationTest.CudaEventTiming .............................................   Passed    0.36 sec
+        Start 109: IntegrationTest.MemoryAlignment
+109/252 Test #109: IntegrationTest.MemoryAlignment .............................................   Passed    0.35 sec
+        Start 110: IntegrationTest.KernelConfigAutoTune
+110/252 Test #110: IntegrationTest.KernelConfigAutoTune ........................................   Passed    0.35 sec
+        Start 111: IntegrationTest.KVCacheMultipleSequences
+111/252 Test #111: IntegrationTest.KVCacheMultipleSequences ....................................   Passed    0.38 sec
+        Start 112: IntegrationTest.TransformerLayerDimensions
+112/252 Test #112: IntegrationTest.TransformerLayerDimensions ..................................   Passed    0.35 sec
+        Start 113: IntegrationTest.GreedySamplingDeterministic
+113/252 Test #113: IntegrationTest.GreedySamplingDeterministic .................................   Passed    0.34 sec
+        Start 114: IntegrationTest.TemperatureAffectsSampling
+114/252 Test #114: IntegrationTest.TemperatureAffectsSampling ..................................   Passed    0.34 sec
+        Start 115: IntegrationTest.GenerationStatsTracking
+115/252 Test #115: IntegrationTest.GenerationStatsTracking .....................................   Passed    0.38 sec
+        Start 116: RMSNormTest.BasicCorrectness
+116/252 Test #116: RMSNormTest.BasicCorrectness ................................................   Passed    0.35 sec
+        Start 117: RMSNormTest.SmallHiddenDim
+117/252 Test #117: RMSNormTest.SmallHiddenDim ..................................................   Passed    0.34 sec
+        Start 118: RMSNormTest.LargeHiddenDim
+118/252 Test #118: RMSNormTest.LargeHiddenDim ..................................................   Passed    0.39 sec
+        Start 119: RMSNormTest.InPlaceVersion
+119/252 Test #119: RMSNormTest.InPlaceVersion ..................................................   Passed    0.35 sec
+        Start 120: AttentionTest.BasicDecodeAttention
+120/252 Test #120: AttentionTest.BasicDecodeAttention ..........................................   Passed    0.37 sec
+        Start 121: AttentionTest.GQADecodeAttention
+121/252 Test #121: AttentionTest.GQADecodeAttention ............................................   Passed    0.34 sec
+        Start 122: AttentionTest.BasicPrefillAttention
+122/252 Test #122: AttentionTest.BasicPrefillAttention .........................................   Passed    0.37 sec
+        Start 123: AttentionTest.GQAPrefillAttention
+123/252 Test #123: AttentionTest.GQAPrefillAttention ...........................................   Passed    0.33 sec
+        Start 124: AttentionTest.PrefillLayoutMatchesCpuReference
+124/252 Test #124: AttentionTest.PrefillLayoutMatchesCpuReference ..............................   Passed    0.34 sec
+        Start 125: AttentionTest.SoftmaxHandlesSeqLenBeyondSharedMemoryLimit
+125/252 Test #125: AttentionTest.SoftmaxHandlesSeqLenBeyondSharedMemoryLimit ...................   Passed    0.34 sec
+        Start 126: AttentionTest.SoftmaxSumsToOne
+126/252 Test #126: AttentionTest.SoftmaxSumsToOne ..............................................   Passed    0.34 sec
+        Start 127: AttentionTest.GQAMappingDecodeMatchesCpuReference
+127/252 Test #127: AttentionTest.GQAMappingDecodeMatchesCpuReference ...........................   Passed    0.35 sec
+        Start 128: AttentionTest.GQADecodeMatchesCpuReference
+128/252 Test #128: AttentionTest.GQADecodeMatchesCpuReference ..................................   Passed    0.39 sec
+        Start 129: AttentionTest.LongSequenceDecodeMatchesCpuReference
+129/252 Test #129: AttentionTest.LongSequenceDecodeMatchesCpuReference .........................   Passed    0.44 sec
+        Start 130: AttentionTest.LongSequencePrefillMatchesCpuReference
+130/252 Test #130: AttentionTest.LongSequencePrefillMatchesCpuReference ........................   Passed    0.43 sec
+        Start 131: AttentionTest.Llama32GQA32To8DecodeMatchesCpuReference
+131/252 Test #131: AttentionTest.Llama32GQA32To8DecodeMatchesCpuReference ......................   Passed    0.37 sec
+        Start 132: AttentionTest.MQA16To1DecodeMatchesCpuReference
+132/252 Test #132: AttentionTest.MQA16To1DecodeMatchesCpuReference .............................   Passed    0.37 sec
+        Start 133: RoPETest.ApplyInplaceMatchesReference
+133/252 Test #133: RoPETest.ApplyInplaceMatchesReference .......................................   Passed    0.37 sec
+        Start 134: RoPETest.PerTokenPositionsMatchReference
+134/252 Test #134: RoPETest.PerTokenPositionsMatchReference ....................................   Passed    0.36 sec
+        Start 135: PagedKvTest.PagedScatterGatherRoundTrip
+135/252 Test #135: PagedKvTest.PagedScatterGatherRoundTrip .....................................   Passed    0.35 sec
+        Start 136: PagedKvTest.PagedGatherPartialVisibility
+136/252 Test #136: PagedKvTest.PagedGatherPartialVisibility ....................................   Passed    0.36 sec
+        Start 137: PagedKvTest.PagedScatterWritesAtAbsolutePosition
+137/252 Test #137: PagedKvTest.PagedScatterWritesAtAbsolutePosition ............................   Passed    0.35 sec
+        Start 138: PagedKvTest.InvalidBlockIdIsGuardedNotDereferenced
+138/252 Test #138: PagedKvTest.InvalidBlockIdIsGuardedNotDereferenced ..........................   Passed    0.34 sec
+        Start 139: PagedKvTest.PagedLayersDoNotOverlap
+139/252 Test #139: PagedKvTest.PagedLayersDoNotOverlap .........................................   Passed    0.34 sec
+        Start 140: ElementwiseTest.AddBiasNonAlignedSizeCorrect
+140/252 Test #140: ElementwiseTest.AddBiasNonAlignedSizeCorrect ................................   Passed    0.34 sec
+        Start 141: KVCacheTest.InitializationAllocatesMemory
+141/252 Test #141: KVCacheTest.InitializationAllocatesMemory ...................................   Passed    0.34 sec
+        Start 142: KVCacheTest.AllocateSequenceReturnsValidId
+142/252 Test #142: KVCacheTest.AllocateSequenceReturnsValidId ..................................   Passed    0.37 sec
+        Start 143: KVCacheTest.AllocateMultipleSequences
+143/252 Test #143: KVCacheTest.AllocateMultipleSequences .......................................   Passed    0.36 sec
+        Start 144: KVCacheTest.ExhaustionReturnsError
+144/252 Test #144: KVCacheTest.ExhaustionReturnsError ..........................................   Passed    0.34 sec
+        Start 145: KVCacheTest.ReleaseSequenceFreesSlot
+145/252 Test #145: KVCacheTest.ReleaseSequenceFreesSlot ........................................   Passed    0.37 sec
+        Start 146: KVCacheTest.GetCacheReturnsValidPointers
+146/252 Test #146: KVCacheTest.GetCacheReturnsValidPointers ....................................   Passed    0.34 sec
+        Start 147: KVCacheTest.GetCacheForInvalidSequenceReturnsNull
+147/252 Test #147: KVCacheTest.GetCacheForInvalidSequenceReturnsNull ...........................   Passed    0.35 sec
+        Start 148: KVCacheTest.InvalidMaxLenReturnsError
+148/252 Test #148: KVCacheTest.InvalidMaxLenReturnsError .......................................   Passed    0.35 sec
+        Start 149: KVCacheTest.MemoryAccountingIsCorrect
+149/252 Test #149: KVCacheTest.MemoryAccountingIsCorrect .......................................   Passed    0.35 sec
+        Start 150: KVCacheTest.CreateFailsOnHugeAllocationWithoutLeak
+150/252 Test #150: KVCacheTest.CreateFailsOnHugeAllocationWithoutLeak ..........................   Passed    0.33 sec
+        Start 151: KVCacheTest.AppendDoesNotAdvanceVisibleSequenceLength
+151/252 Test #151: KVCacheTest.AppendDoesNotAdvanceVisibleSequenceLength .......................   Passed    0.35 sec
+        Start 152: KVCacheTest.InvalidLayerReturnsNullCachePointers
+152/252 Test #152: KVCacheTest.InvalidLayerReturnsNullCachePointers ............................   Passed    0.33 sec
+        Start 153: KVCacheTest.InvalidAppendInputsDoNotAdvanceSequenceLength
+153/252 Test #153: KVCacheTest.InvalidAppendInputsDoNotAdvanceSequenceLength ...................   Passed    0.37 sec
+        Start 154: KVCacheTest.AdvanceSeqLenFailsOnOverflow
+154/252 Test #154: KVCacheTest.AdvanceSeqLenFailsOnOverflow ....................................   Passed    0.35 sec
+        Start 155: KVCacheTest.AdvanceSeqLenIgnoresNonPositiveValues
+155/252 Test #155: KVCacheTest.AdvanceSeqLenIgnoresNonPositiveValues ...........................   Passed    0.38 sec
+        Start 156: ModelLoaderContractTest.NonTiedOutputWeightLoads
+156/252 Test #156: ModelLoaderContractTest.NonTiedOutputWeightLoads ............................   Passed    0.34 sec
+        Start 157: ModelLoaderContractTest.TiedOutputEmbeddingFallsBackToTokenEmbedding
+157/252 Test #157: ModelLoaderContractTest.TiedOutputEmbeddingFallsBackToTokenEmbedding ........   Passed    0.38 sec
+        Start 158: ModelLoaderContractTest.QwenAttentionBiasTensorsLoad
+158/252 Test #158: ModelLoaderContractTest.QwenAttentionBiasTensorsLoad ........................   Passed    0.43 sec
+        Start 159: ModelLoaderContractTest.TransposedWeightCopiesBuiltAndCorrect
+159/252 Test #159: ModelLoaderContractTest.TransposedWeightCopiesBuiltAndCorrect ...............   Passed    0.38 sec
+        Start 160: ModelLoaderContractTest.UnsupportedBiasTensorReturnsExplicitError
+160/252 Test #160: ModelLoaderContractTest.UnsupportedBiasTensorReturnsExplicitError ...........   Passed    0.01 sec
+        Start 161: GGUFTensorInfoTest.NumElementsReturnsZeroOnOverflow
+161/252 Test #161: GGUFTensorInfoTest.NumElementsReturnsZeroOnOverflow .........................   Passed    0.01 sec
+        Start 162: GGUFTensorInfoTest.CalculateSizeReturnsZeroOnOverflow
+162/252 Test #162: GGUFTensorInfoTest.CalculateSizeReturnsZeroOnOverflow .......................   Passed    0.00 sec
+        Start 163: GGUFHeaderTest.OversizedArrayReturnsErrorInsteadOfThrowing
+163/252 Test #163: GGUFHeaderTest.OversizedArrayReturnsErrorInsteadOfThrowing ..................   Passed    0.00 sec
+        Start 164: GGUFHeaderTest.ExtractModelConfigIgnoresNumericArchitectureMetadata
+164/252 Test #164: GGUFHeaderTest.ExtractModelConfigIgnoresNumericArchitectureMetadata .........   Passed    0.00 sec
+        Start 165: GGUFHeaderTest.IncompleteRuntimeGGUFReturnsStructuredErrorWithoutThrowing
+165/252 Test #165: GGUFHeaderTest.IncompleteRuntimeGGUFReturnsStructuredErrorWithoutThrowing ...   Passed    0.00 sec
+        Start 166: GGUFHeaderTest.ValidHeaderTruncatedTensorData
+166/252 Test #166: GGUFHeaderTest.ValidHeaderTruncatedTensorData ...............................   Passed    0.00 sec
+        Start 167: GGUFHeaderTest.ValidHeaderTruncatedMetadata
+167/252 Test #167: GGUFHeaderTest.ValidHeaderTruncatedMetadata .................................   Passed    0.00 sec
+        Start 168: GGUFHeaderTest.HugeEntryCountsFailCleanlyWithoutThrowing
+168/252 Test #168: GGUFHeaderTest.HugeEntryCountsFailCleanlyWithoutThrowing ....................   Passed    0.00 sec
+        Start 169: GGUFHeaderTest.HugeMetadataCountFailsCleanlyWithoutThrowing
+169/252 Test #169: GGUFHeaderTest.HugeMetadataCountFailsCleanlyWithoutThrowing .................   Passed    0.00 sec
+        Start 170: GGUFHeaderTest.ValidHeader
+170/252 Test #170: GGUFHeaderTest.ValidHeader ..................................................   Passed    0.00 sec
+        Start 171: GGUFHeaderTest.InvalidMagic
+171/252 Test #171: GGUFHeaderTest.InvalidMagic .................................................   Passed    0.00 sec
+        Start 172: GGUFHeaderTest.UnsupportedVersion
+172/252 Test #172: GGUFHeaderTest.UnsupportedVersion ...........................................   Passed    0.00 sec
+        Start 173: BinLoaderTest.InvalidMagic
+173/252 Test #173: BinLoaderTest.InvalidMagic ..................................................   Passed    0.00 sec
+        Start 174: BinLoaderTest.FileNotFound
+174/252 Test #174: BinLoaderTest.FileNotFound ..................................................   Passed    0.00 sec
+        Start 175: BinLoaderTest.GGUFLoadFailsOnMissingFile
+175/252 Test #175: BinLoaderTest.GGUFLoadFailsOnMissingFile ....................................   Passed    0.00 sec
+        Start 176: BinLoaderTest.TruncatedHeader
+176/252 Test #176: BinLoaderTest.TruncatedHeader ...............................................   Passed    0.01 sec
+        Start 177: BinLoaderTest.DimensionMismatch
+177/252 Test #177: BinLoaderTest.DimensionMismatch .............................................   Passed    0.01 sec
+        Start 178: PagedDirectTest.DirectMatchesLegacyBitwiseAndOracle
+178/252 Test #178: PagedDirectTest.DirectMatchesLegacyBitwiseAndOracle .........................   Passed    0.45 sec
+        Start 179: PagedDirectTest.InvalidBlockIdsMatchLegacyZeroRows
+179/252 Test #179: PagedDirectTest.InvalidBlockIdsMatchLegacyZeroRows ..........................   Passed    0.38 sec
+        Start 180: PagedDirectTest.EmptyVisibleWindowMatchesLegacy
+180/252 Test #180: PagedDirectTest.EmptyVisibleWindowMatchesLegacy .............................   Passed    0.38 sec
+        Start 181: PagedDirectTest.ShortBlockTableIsGuardedWithoutFault
+181/252 Test #181: PagedDirectTest.ShortBlockTableIsGuardedWithoutFault ........................   Passed    0.40 sec
+        Start 182: PagedDirectTest.MultiLayerPoolOffsetIsAddressable
+182/252 Test #182: PagedDirectTest.MultiLayerPoolOffsetIsAddressable ...........................   Passed    0.34 sec
+        Start 183: PagedDispatchTest.DefaultModeIsLegacySoGatherRuns
+183/252 Test #183: PagedDispatchTest.DefaultModeIsLegacySoGatherRuns ...........................   Passed    0.35 sec
+        Start 184: PagedDispatchTest.DirectModeSkipsGather
+184/252 Test #184: PagedDispatchTest.DirectModeSkipsGather .....................................   Passed    0.38 sec
+        Start 185: PagedDispatchTest.AutoAndDirectAreCaseInsensitiveAndSkipGather
+185/252 Test #185: PagedDispatchTest.AutoAndDirectAreCaseInsensitiveAndSkipGather ..............   Passed    0.37 sec
+        Start 186: PagedDispatchTest.LegacyIsCaseInsensitive
+186/252 Test #186: PagedDispatchTest.LegacyIsCaseInsensitive ...................................   Passed    0.36 sec
+        Start 187: PagedDispatchTest.DirectAndLegacyProduceIdenticalLayerOutput
+187/252 Test #187: PagedDispatchTest.DirectAndLegacyProduceIdenticalLayerOutput ................   Passed    0.35 sec
+        Start 188: PagedDispatchTest.DirectAndLegacyAgreeAcrossSteps
+188/252 Test #188: PagedDispatchTest.DirectAndLegacyAgreeAcrossSteps ...........................   Passed    0.40 sec
+        Start 189: PagedDispatchTest.InvalidModeValueFailsLoudly
+189/252 Test #189: PagedDispatchTest.InvalidModeValueFailsLoudly ...............................   Passed    0.35 sec
+        Start 190: PagedDispatchTest.PrefillIgnoresTheSwitch
+190/252 Test #190: PagedDispatchTest.PrefillIgnoresTheSwitch ...................................   Passed    0.36 sec
+        Start 191: PagedDispatchTest.SplitKvOffByDefaultAndSingleSplitIsTheSinglePassPath
+191/252 Test #191: PagedDispatchTest.SplitKvOffByDefaultAndSingleSplitIsTheSinglePassPath ......   Passed    0.36 sec
+        Start 192: PagedDispatchTest.InvalidSplitKvValueFailsLoudly
+192/252 Test #192: PagedDispatchTest.InvalidSplitKvValueFailsLoudly ............................   Passed    0.36 sec
+        Start 193: PagedDispatchTest.SplitKvLegacyAndDirectAgreeBitwiseAtSameSplits
+193/252 Test #193: PagedDispatchTest.SplitKvLegacyAndDirectAgreeBitwiseAtSameSplits ............   Passed    0.36 sec
+        Start 194: PagedDispatchTest.SplitKvChangesNumericsOnlySlightlyVersusSinglePass
+194/252 Test #194: PagedDispatchTest.SplitKvChangesNumericsOnlySlightlyVersusSinglePass ........   Passed    0.35 sec
+        Start 195: PagedDispatchTest.SplitKvEntryActuallyWritesPartials
+195/252 Test #195: PagedDispatchTest.SplitKvEntryActuallyWritesPartials ........................   Passed    0.34 sec
+        Start 196: PagedDispatchTest.SplitKvDoesNotAffectPrefill
+196/252 Test #196: PagedDispatchTest.SplitKvDoesNotAffectPrefill ...............................   Passed    0.35 sec
+        Start 197: PagedOracleKernelTest.ScatterGatherDecodeMatchesIndependentOracle
+197/252 Test #197: PagedOracleKernelTest.ScatterGatherDecodeMatchesIndependentOracle ...........   Passed    0.41 sec
+        Start 198: PagedOracleKernelTest.IncrementalScatterAtNonZeroPositionsMatchesOracle
+198/252 Test #198: PagedOracleKernelTest.IncrementalScatterAtNonZeroPositionsMatchesOracle .....   Passed    0.34 sec
+        Start 199: PagedOracleKernelTest.InvalidBlockIdMatchesZeroRowOracle
+199/252 Test #199: PagedOracleKernelTest.InvalidBlockIdMatchesZeroRowOracle ....................   Passed    0.34 sec
+        Start 200: PagedOracleKernelTest.MultiLayerPoolOffsetIsolatedAndAddressable
+200/252 Test #200: PagedOracleKernelTest.MultiLayerPoolOffsetIsolatedAndAddressable ............   Passed    0.34 sec
+        Start 201: PagedOracleLayerTest.ForwardPagedKVMatchesContiguousKVPerLayer
+201/252 Test #201: PagedOracleLayerTest.ForwardPagedKVMatchesContiguousKVPerLayer ..............   Passed    0.35 sec
+        Start 202: PagedOracleLayerTest.ForwardPagedRejectsInvalidGeometryAndShortBlockTable
+202/252 Test #202: PagedOracleLayerTest.ForwardPagedRejectsInvalidGeometryAndShortBlockTable ...   Passed    0.36 sec
+        Start 203: PagedOracleContractTest.BlockTableLengthContractMatchesCeilDivision
+203/252 Test #203: PagedOracleContractTest.BlockTableLengthContractMatchesCeilDivision .........   Passed    0.00 sec
+        Start 204: PagedOracleContractTest.FrozenAddressFormulaIsSelfConsistent
+204/252 Test #204: PagedOracleContractTest.FrozenAddressFormulaIsSelfConsistent ................   Passed    0.00 sec
+        Start 205: DequantizeQ5_0.NullPointerFails
+205/252 Test #205: DequantizeQ5_0.NullPointerFails .............................................   Passed    0.00 sec
+        Start 206: DequantizeQ5_0.MatchesReferenceOnSyntheticBlock
+206/252 Test #206: DequantizeQ5_0.MatchesReferenceOnSyntheticBlock .............................   Passed    0.00 sec
+        Start 207: DequantizeQ4_K.NullPointerFails
+207/252 Test #207: DequantizeQ4_K.NullPointerFails .............................................   Passed    0.00 sec
+        Start 208: DequantizeQ4_K.MatchesReferenceOnSyntheticBlock
+208/252 Test #208: DequantizeQ4_K.MatchesReferenceOnSyntheticBlock .............................   Passed    0.00 sec
+        Start 209: DequantizeQ6_K.NullPointerFails
+209/252 Test #209: DequantizeQ6_K.NullPointerFails .............................................   Passed    0.00 sec
+        Start 210: DequantizeQ6_K.MatchesReferenceOnSyntheticBlock
+210/252 Test #210: DequantizeQ6_K.MatchesReferenceOnSyntheticBlock .............................   Passed    0.00 sec
+        Start 211: GGUFRealModelTest.ConfigMatchesQwen25HalfB
+211/252 Test #211: GGUFRealModelTest.ConfigMatchesQwen25HalfB ..................................   Passed    0.06 sec
+        Start 212: GGUFRealModelTest.FirstBlocksMatchPythonReference
+212/252 Test #212: GGUFRealModelTest.FirstBlocksMatchPythonReference ...........................   Passed    0.26 sec
+        Start 213: GGUFRealModelTest.WeightW8A16RoundTripPreservesValues
+213/252 Test #213: GGUFRealModelTest.WeightW8A16RoundTripPreservesValues .......................   Passed    0.07 sec
+        Start 214: W8A16Quantize.TinyNonZeroGroupKeepsNonUnitScale
+214/252 Test #214: W8A16Quantize.TinyNonZeroGroupKeepsNonUnitScale .............................   Passed    0.00 sec
+        Start 215: Tokenizer.ByteEncodingTable
+215/252 Test #215: Tokenizer.ByteEncodingTable .................................................   Passed    0.00 sec
+        Start 216: Tokenizer.DecodeUtf8CodepointsFallsBackPerByteOnInvalidContinuation
+216/252 Test #216: Tokenizer.DecodeUtf8CodepointsFallsBackPerByteOnInvalidContinuation .........   Passed    0.00 sec
+        Start 217: Tokenizer.SyntheticEncode
+217/252 Test #217: Tokenizer.SyntheticEncode ...................................................   Passed    0.00 sec
+        Start 218: Tokenizer.MissingSpecialIdsDefaultToMinusOne
+218/252 Test #218: Tokenizer.MissingSpecialIdsDefaultToMinusOne ................................   Passed    0.00 sec
+        Start 219: TokenizerRealModel.DifferentialAgainstHuggingFace
+219/252 Test #219: TokenizerRealModel.DifferentialAgainstHuggingFace ...........................   Passed    0.16 sec
+        Start 220: TokenizerRealModel.RoundTripDecode
+220/252 Test #220: TokenizerRealModel.RoundTripDecode ..........................................   Passed    0.17 sec
+        Start 221: TransformerTest.AttentionDecodeVsPrefillSingleToken
+221/252 Test #221: TransformerTest.AttentionDecodeVsPrefillSingleToken .........................   Passed    0.38 sec
+        Start 222: TransformerTest.KeyProjectionUsesItsOwnGroupSize
+222/252 Test #222: TransformerTest.KeyProjectionUsesItsOwnGroupSize ............................   Passed    0.35 sec
+        Start 223: TransformerTest.KVCacheAppendRetrieve
+223/252 Test #223: TransformerTest.KVCacheAppendRetrieve .......................................   Passed    0.35 sec
+        Start 224: QuantizedWeightTest.DefaultConstructorCreatesInvalidWeight
+224/252 Test #224: QuantizedWeightTest.DefaultConstructorCreatesInvalidWeight ..................   Passed    0.00 sec
+        Start 225: QuantizedWeightTest.ScaleDimensionsCalculation
+225/252 Test #225: QuantizedWeightTest.ScaleDimensionsCalculation ..............................   Passed    0.00 sec
+        Start 226: QuantizedWeightTest.ScaleDimensionsWithNonDivisible
+226/252 Test #226: QuantizedWeightTest.ScaleDimensionsWithNonDivisible .........................   Passed    0.00 sec
+        Start 227: QuantizedWeightTest.MemorySizeCalculation
+227/252 Test #227: QuantizedWeightTest.MemorySizeCalculation ...................................   Passed    0.00 sec
+        Start 228: ModelConfigTest.DefaultValues
+228/252 Test #228: ModelConfigTest.DefaultValues ...............................................   Passed    0.00 sec
+        Start 229: GenerationConfigTest.DefaultValues
+229/252 Test #229: GenerationConfigTest.DefaultValues ..........................................   Passed    0.00 sec
+        Start 230: KVCacheConfigTest.DefaultValues
+230/252 Test #230: KVCacheConfigTest.DefaultValues .............................................   Passed    0.00 sec
+        Start 231: ValidateModelConfigTest.AcceptsRealisticGqaConfig
+231/252 Test #231: ValidateModelConfigTest.AcceptsRealisticGqaConfig ...........................   Passed    0.00 sec
+        Start 232: ValidateModelConfigTest.AcceptsMhaConfig
+232/252 Test #232: ValidateModelConfigTest.AcceptsMhaConfig ....................................   Passed    0.00 sec
+        Start 233: ValidateModelConfigTest.AcceptsMqaConfig
+233/252 Test #233: ValidateModelConfigTest.AcceptsMqaConfig ....................................   Passed    0.00 sec
+        Start 234: ValidateModelConfigTest.RejectsHeadCountsThatWouldOverrunKvHead
+234/252 Test #234: ValidateModelConfigTest.RejectsHeadCountsThatWouldOverrunKvHead .............   Passed    0.00 sec
+        Start 235: ValidateModelConfigTest.RejectsAllNonDivisibleHeadCounts
+235/252 Test #235: ValidateModelConfigTest.RejectsAllNonDivisibleHeadCounts ....................   Passed    0.00 sec
+        Start 236: ValidateModelConfigTest.RejectsHiddenDimNotDivisibleByHeads
+236/252 Test #236: ValidateModelConfigTest.RejectsHiddenDimNotDivisibleByHeads .................   Passed    0.00 sec
+        Start 237: ValidateModelConfigTest.RejectsOddHeadDim
+237/252 Test #237: ValidateModelConfigTest.RejectsOddHeadDim ...................................   Passed    0.00 sec
+        Start 238: ValidateModelConfigTest.RejectsNonPositiveDimensions
+238/252 Test #238: ValidateModelConfigTest.RejectsNonPositiveDimensions ........................   Passed    0.00 sec
+        Start 239: ValidateModelConfigTest.RejectsNonPositiveRmsNormEps
+239/252 Test #239: ValidateModelConfigTest.RejectsNonPositiveRmsNormEps ........................   Passed    0.00 sec
+        Start 240: ModelConfigBoundaryTest.TinyLlmLoadRejectsNonDivisibleHeadCounts
+240/252 Test #240: ModelConfigBoundaryTest.TinyLlmLoadRejectsNonDivisibleHeadCounts ............   Passed    0.00 sec
+        Start 241: ModelConfigBoundaryTest.TinyLlmLoadDoesNotRejectValidGeometry
+241/252 Test #241: ModelConfigBoundaryTest.TinyLlmLoadDoesNotRejectValidGeometry ...............   Passed    0.00 sec
+        Start 242: W8A16MatMulTest.SmallMatrixCorrectness
+242/252 Test #242: W8A16MatMulTest.SmallMatrixCorrectness ......................................   Passed    0.35 sec
+        Start 243: W8A16MatMulTest.EdgeCaseM1
+243/252 Test #243: W8A16MatMulTest.EdgeCaseM1 ..................................................   Passed    0.38 sec
+        Start 244: W8A16MatMulTest.EdgeCaseN1
+244/252 Test #244: W8A16MatMulTest.EdgeCaseN1 ..................................................   Passed    0.34 sec
+        Start 245: W8A16MatMulTest.NonAlignedDimensions
+245/252 Test #245: W8A16MatMulTest.NonAlignedDimensions ........................................   Passed    0.35 sec
+        Start 246: W8A16MatMulTest.LargeMatrixTiledMatchesReference
+246/252 Test #246: W8A16MatMulTest.LargeMatrixTiledMatchesReference ............................   Passed    0.34 sec
+        Start 247: W8A16MatMulTest.Fp16MatmulM1MatchesReference
+247/252 Test #247: W8A16MatMulTest.Fp16MatmulM1MatchesReference ................................   Passed    0.38 sec
+        Start 248: W8A16MatMulTest.Fp16MatmulM4FallsBackToReference
+248/252 Test #248: W8A16MatMulTest.Fp16MatmulM4FallsBackToReference ............................   Passed    0.34 sec
+        Start 249: W8A16MatMulTest.Fp16MatmulTransposedM4MatchesReference
+249/252 Test #249: W8A16MatMulTest.Fp16MatmulTransposedM4MatchesReference ......................   Passed    0.35 sec
+        Start 250: W8A16MatMulTest.TransposedFastPathMatchesCpuReference
+250/252 Test #250: W8A16MatMulTest.TransposedFastPathMatchesCpuReference .......................   Passed    0.40 sec
+        Start 251: W8A16MatMulTest.TransposedFastPathFallsBackWithoutBuffers
+251/252 Test #251: W8A16MatMulTest.TransposedFastPathFallsBackWithoutBuffers ...................   Passed    0.35 sec
+        Start 252: W8A16MatMulTest.Fp16MatmulTransposedMatchesUntransposed
+252/252 Test #252: W8A16MatMulTest.Fp16MatmulTransposedMatchesUntransposed .....................   Passed    0.36 sec
+
+100% tests passed, 0 tests failed out of 252
+
+Total Test time (real) = 224.02 sec

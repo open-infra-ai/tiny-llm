@@ -63,6 +63,7 @@ Thumbs.db
 
 # Logs
 *.log
+!docs/performance/results/data/*.log
 
 # Temporary files
 *.tmp
